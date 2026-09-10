@@ -1,0 +1,82 @@
+// Package main is the entry point for the Retriever RAG Ingestion Pipeline.
+//
+// Retriever ingests documents, chunks them using configurable strategies,
+// generates embeddings via a concurrent worker pool, stores vectors in
+// Postgres (pgvector), and exposes a semantic search API.
+//
+// Architecture: Pipeline-based — Ingestion → Chunking → Embedding → Storage → Search
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/Rebira678/Retriever/internal/chunker"
+	"github.com/Rebira678/Retriever/internal/config"
+)
+
+func main() {
+	// ─── Structured Logger ───────────────────────────────────────────────
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
+
+	slog.Info("🚀 Retriever RAG Ingestion Pipeline starting",
+		"version", "0.1.0",
+		"day", 29,
+	)
+
+	// ─── Load Configuration ─────────────────────────────────────────────
+	cfg := config.Default()
+	slog.Info("Configuration loaded",
+		"chunk_size", cfg.ChunkSize,
+		"chunk_overlap", cfg.ChunkOverlap,
+		"strategy", cfg.ChunkStrategy,
+	)
+
+	// ─── Demo: Chunking a Sample Document ───────────────────────────────
+	sampleDoc := `Retrieval-Augmented Generation (RAG) is an AI framework that enhances
+large language model responses by incorporating external knowledge retrieval.
+Instead of relying solely on trained parameters, RAG systems fetch relevant
+documents from a vector database and include them as context in the prompt.
+
+The RAG pipeline typically consists of three phases:
+1. Ingestion — documents are loaded, split into chunks, and embedded as vectors.
+2. Retrieval — a user query is embedded and compared against stored vectors
+   using similarity search (cosine or L2 distance).
+3. Generation — the retrieved chunks are appended to the LLM prompt, grounding
+   the model's response in factual, up-to-date information.
+
+This architecture solves the "knowledge cutoff" problem inherent in static LLMs
+and dramatically reduces hallucination by providing verifiable source material.
+RAG is now the dominant pattern for production AI applications that need
+accurate, domain-specific answers — from customer support bots to legal
+research tools to medical diagnosis assistants.`
+
+	// Create the chunker based on configuration
+	c := chunker.New(cfg.ChunkSize, cfg.ChunkOverlap)
+
+	chunks := c.Chunk(sampleDoc)
+	slog.Info("Document chunked successfully",
+		"input_length", len(sampleDoc),
+		"num_chunks", len(chunks),
+		"strategy", "fixed_size_overlap",
+	)
+
+	for i, chunk := range chunks {
+		fmt.Printf("\n─── Chunk %d (len=%d) ───\n%s\n", i+1, len(chunk.Text), chunk.Text)
+	}
+
+	// ─── Graceful Shutdown ──────────────────────────────────────────────
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	slog.Info("Retriever is ready. Press Ctrl+C to exit.")
+	<-ctx.Done()
+	slog.Info("Shutting down gracefully...")
+}
