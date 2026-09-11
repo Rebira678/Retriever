@@ -31,6 +31,12 @@ type Config struct {
 	// EmbeddingDimension is the vector dimension of the embedding output.
 	EmbeddingDimension int
 
+	// OpenAIAPIKey is the API key for OpenAI.
+	OpenAIAPIKey string
+
+	// EmbeddingAPIURL is the endpoint for embeddings API.
+	EmbeddingAPIURL string
+
 	// WorkerPoolSize is the number of concurrent embedding workers.
 	WorkerPoolSize int
 
@@ -54,6 +60,8 @@ func Default() *Config {
 		ChunkStrategy:      "fixed_size",
 		EmbeddingModel:     "text-embedding-3-small",
 		EmbeddingDimension: 1536,
+		OpenAIAPIKey:       "",
+		EmbeddingAPIURL:    "https://api.openai.com/v1/embeddings",
 		WorkerPoolSize:     4,
 		DatabaseURL:        "postgres://retriever:retriever@localhost:5432/retriever?sslmode=disable",
 		GRPCPort:           ":50051",
@@ -85,6 +93,12 @@ func FromEnv() *Config {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.EmbeddingDimension = n
 		}
+	}
+	if v := os.Getenv("RETRIEVER_OPENAI_API_KEY"); v != "" {
+		cfg.OpenAIAPIKey = v
+	}
+	if v := os.Getenv("RETRIEVER_EMBEDDING_API_URL"); v != "" {
+		cfg.EmbeddingAPIURL = v
 	}
 	if v := os.Getenv("RETRIEVER_WORKER_POOL_SIZE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

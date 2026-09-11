@@ -17,6 +17,7 @@ import (
 
 	"github.com/Rebira678/Retriever/internal/chunker"
 	"github.com/Rebira678/Retriever/internal/config"
+	"github.com/Rebira678/Retriever/internal/embedder"
 )
 
 func main() {
@@ -70,6 +71,26 @@ research tools to medical diagnosis assistants.`
 
 	for i, chunk := range chunks {
 		fmt.Printf("\n─── Chunk %d (len=%d) ───\n%s\n", i+1, len(chunk.Text), chunk.Text)
+	}
+
+	// ─── Demo: Embedding the First Chunk ───────────────────────────────
+	if cfg.OpenAIAPIKey != "" {
+		emb := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingAPIURL, cfg.EmbeddingModel)
+		slog.Info("Generating embedding for the first chunk...")
+		
+		embedding, err := emb.EmbedChunk(context.Background(), chunks[0])
+		if err != nil {
+			slog.Error("Failed to generate embedding", "error", err)
+		} else {
+			slog.Info("Embedding generated successfully",
+				"vector_length", len(embedding.Vector),
+				"model", embedding.Model,
+			)
+			fmt.Printf("\n─── First Chunk Embedding (Sample) ───\n[%f, %f, %f, ...]\n",
+				embedding.Vector[0], embedding.Vector[1], embedding.Vector[2])
+		}
+	} else {
+		slog.Info("Skipping embedding generation (RETRIEVER_OPENAI_API_KEY is not set)")
 	}
 
 	// ─── Graceful Shutdown ──────────────────────────────────────────────
