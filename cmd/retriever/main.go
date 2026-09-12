@@ -85,7 +85,6 @@ research tools to medical diagnosis assistants.`
 	if cfg.GeminiAPIKey != "" {
 		slog.Info("Using Gemini Embedder")
 		emb = embedder.NewGeminiEmbedder(cfg.GeminiAPIKey, "gemini-embedding-2")
-		dimension = 768 // Gemini-embedding-2 defaults to 768 dimensions
 	} else if cfg.OpenAIAPIKey != "" {
 		slog.Info("Using OpenAI Embedder")
 		emb = embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingAPIURL, cfg.EmbeddingModel)
@@ -126,8 +125,13 @@ research tools to medical diagnosis assistants.`
 		slog.Info("Concurrent embedding completed successfully", "total_embeddings_generated", len(generatedEmbeddings))
 
 		// ─── Demo: Save to PostgreSQL (pgvector) ──────────────────────────────────
-		slog.Info("Connecting to PostgreSQL to save vectors...", "url", cfg.DatabaseURL)
-		store, err := storage.NewPostgresStorage(context.Background(), cfg.DatabaseURL, dimension)
+		actualDimension := dimension
+		if len(generatedEmbeddings) > 0 {
+			actualDimension = len(generatedEmbeddings[0].Vector)
+		}
+
+		slog.Info("Connecting to PostgreSQL to save vectors...", "url", cfg.DatabaseURL, "detected_dimension", actualDimension)
+		store, err := storage.NewPostgresStorage(context.Background(), cfg.DatabaseURL, actualDimension)
 		if err != nil {
 			slog.Error("Failed to connect to database", "error", err)
 		} else {
