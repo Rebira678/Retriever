@@ -20,6 +20,7 @@ import (
 	"github.com/Rebira678/Retriever/internal/embedder"
 	"github.com/Rebira678/Retriever/internal/models"
 	"github.com/Rebira678/Retriever/internal/pipeline"
+	"github.com/Rebira678/Retriever/internal/storage"
 
 	_ "github.com/joho/godotenv/autoload"
 )
@@ -79,9 +80,12 @@ research tools to medical diagnosis assistants.`
 
 	// ─── Demo: Concurrent Embedding with Worker Pool ───────────────────────────────
 	var emb embedder.Embedder
+	dimension := cfg.EmbeddingDimension
+
 	if cfg.GeminiAPIKey != "" {
 		slog.Info("Using Gemini Embedder")
 		emb = embedder.NewGeminiEmbedder(cfg.GeminiAPIKey, "gemini-embedding-2")
+		dimension = 768 // Gemini-embedding-2 defaults to 768 dimensions
 	} else if cfg.OpenAIAPIKey != "" {
 		slog.Info("Using OpenAI Embedder")
 		emb = embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingAPIURL, cfg.EmbeddingModel)
@@ -105,21 +109,35 @@ research tools to medical diagnosis assistants.`
 		// Run the worker pool (blocks until all chunks are embedded)
 		pool.Run(context.Background(), chunkChan, resultsChan)
 
-		// Read the results
-		var embeddedCount int
+		// Read the results into a slice for batch saving
+		var generatedEmbeddings []models.Embedding
 		for res := range resultsChan {
 			if res.Err != nil {
 				slog.Error("Failed to embed chunk", "chunk_index", res.Chunk.Index, "error", res.Err)
 				continue
 			}
 			
-			embeddedCount++
-			if embeddedCount == 1 {
+			generatedEmbeddings = append(generatedEmbeddings, res.Embedding)
+			if len(generatedEmbeddings) == 1 {
 				fmt.Printf("\n─── First Chunk Embedding (Sample) ───\n[%f, %f, %f, ...]\n",
 					res.Embedding.Vector[0], res.Embedding.Vector[1], res.Embedding.Vector[2])
 			}
 		}
-		slog.Info("Concurrent embedding completed successfully", "total_embeddings_generated", embeddedCount)
+		slog.Info("Concurrent embedding completed successfully", "total_embeddings_generated", len(generatedEmbeddings))
+
+		// ─── Demo: Save to PostgreSQL (pgvector) ──────────────────────────────────
+		slog.Info("Connecting to PostgreSQL to save vectors...", "url", cfg.DatabaseURL)
+		store, err := storage.NewPostgresStorage(context.Background(), cfg.DatabaseURL, dimension)
+		if err != nil {
+			slog.Error("Failed to connect to database", "error", err)
+		} else {
+			defer store.Close()
+			if err := store.SaveEmbeddings(context.Background(), generatedEmbeddings); err != nil {
+				slog.Error("Failed to save embeddings to database", "error", err)
+			} else {
+				slog.Info("Successfully saved embeddings to pgvector!", "count", len(generatedEmbeddings))
+			}
+		}
 
 	} else {
 		slog.Info("Skipping concurrent embedding generation (neither RETRIEVER_GEMINI_API_KEY nor RETRIEVER_OPENAI_API_KEY is set)")

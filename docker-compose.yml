@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  postgres:
+    # We use the pgvector image which comes with Postgres 16 and the pgvector extension pre-installed.
+    image: pgvector/pgvector:pg16
+    container_name: retriever-postgres
+    environment:
+      POSTGRES_USER: retriever
+      POSTGRES_PASSWORD: retriever
+      POSTGRES_DB: retriever
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

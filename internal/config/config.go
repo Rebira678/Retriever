@@ -67,7 +67,7 @@ func Default() *Config {
 		GeminiAPIKey:       "",
 		EmbeddingAPIURL:    "https://api.openai.com/v1/embeddings",
 		WorkerPoolSize:     4,
-		DatabaseURL:        "postgres://retriever:retriever@localhost:5432/retriever?sslmode=disable",
+		DatabaseURL:        "postgres://retriever:retriever@localhost:5433/retriever?sslmode=disable",
 		GRPCPort:           ":50051",
 		HTTPPort:           ":8080",
 	}
