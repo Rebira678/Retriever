@@ -20,6 +20,8 @@ import (
 	"github.com/Rebira678/Retriever/internal/embedder"
 	"github.com/Rebira678/Retriever/internal/models"
 	"github.com/Rebira678/Retriever/internal/pipeline"
+
+	_ "github.com/joho/godotenv/autoload"
 )
 
 func main() {
