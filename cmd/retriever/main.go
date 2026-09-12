@@ -18,6 +18,8 @@ import (
 	"github.com/Rebira678/Retriever/internal/chunker"
 	"github.com/Rebira678/Retriever/internal/config"
 	"github.com/Rebira678/Retriever/internal/embedder"
+	"github.com/Rebira678/Retriever/internal/models"
+	"github.com/Rebira678/Retriever/internal/pipeline"
 )
 
 func main() {
@@ -73,24 +75,39 @@ research tools to medical diagnosis assistants.`
 		fmt.Printf("\n─── Chunk %d (len=%d) ───\n%s\n", i+1, len(chunk.Text), chunk.Text)
 	}
 
-	// ─── Demo: Embedding the First Chunk ───────────────────────────────
+	// ─── Demo: Concurrent Embedding with Worker Pool ───────────────────────────────
 	if cfg.OpenAIAPIKey != "" {
 		emb := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingAPIURL, cfg.EmbeddingModel)
-		slog.Info("Generating embedding for the first chunk...")
-		
-		embedding, err := emb.EmbedChunk(context.Background(), chunks[0])
-		if err != nil {
-			slog.Error("Failed to generate embedding", "error", err)
-		} else {
-			slog.Info("Embedding generated successfully",
-				"vector_length", len(embedding.Vector),
-				"model", embedding.Model,
-			)
-			fmt.Printf("\n─── First Chunk Embedding (Sample) ───\n[%f, %f, %f, ...]\n",
-				embedding.Vector[0], embedding.Vector[1], embedding.Vector[2])
+		pool := pipeline.NewEmbedPool(emb, cfg.WorkerPoolSize)
+
+		// Set up channels with backpressure
+		chunkChan := make(chan models.Chunk, len(chunks))
+		embeddingChan := make(chan models.Embedding, len(chunks))
+
+		// Feed chunks into the pipeline
+		for _, chunk := range chunks {
+			chunkChan <- chunk
 		}
+		close(chunkChan)
+
+		slog.Info("Starting concurrent embedding worker pool...", "workers", cfg.WorkerPoolSize)
+
+		// Run the worker pool (blocks until all chunks are embedded)
+		pool.Run(context.Background(), chunkChan, embeddingChan)
+
+		// Read the results
+		var embeddedCount int
+		for embResult := range embeddingChan {
+			embeddedCount++
+			if embeddedCount == 1 {
+				fmt.Printf("\n─── First Chunk Embedding (Sample) ───\n[%f, %f, %f, ...]\n",
+					embResult.Vector[0], embResult.Vector[1], embResult.Vector[2])
+			}
+		}
+		slog.Info("Concurrent embedding completed successfully", "total_embeddings_generated", embeddedCount)
+
 	} else {
-		slog.Info("Skipping embedding generation (RETRIEVER_OPENAI_API_KEY is not set)")
+		slog.Info("Skipping concurrent embedding generation (RETRIEVER_OPENAI_API_KEY is not set)")
 	}
 
 	// ─── Graceful Shutdown ──────────────────────────────────────────────
