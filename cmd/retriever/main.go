@@ -37,7 +37,7 @@ func main() {
 	)
 
 	// ─── Load Configuration ─────────────────────────────────────────────
-	cfg := config.Default()
+	cfg := config.FromEnv()
 	slog.Info("Configuration loaded",
 		"chunk_size", cfg.ChunkSize,
 		"chunk_overlap", cfg.ChunkOverlap,
@@ -81,7 +81,7 @@ research tools to medical diagnosis assistants.`
 	var emb embedder.Embedder
 	if cfg.GeminiAPIKey != "" {
 		slog.Info("Using Gemini Embedder")
-		emb = embedder.NewGeminiEmbedder(cfg.GeminiAPIKey, "text-embedding-004")
+		emb = embedder.NewGeminiEmbedder(cfg.GeminiAPIKey, "gemini-embedding-2")
 	} else if cfg.OpenAIAPIKey != "" {
 		slog.Info("Using OpenAI Embedder")
 		emb = embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingAPIURL, cfg.EmbeddingModel)

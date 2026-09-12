@@ -436,7 +436,7 @@ type Embedder interface {
 // When the user provides a Gemini key, we swap out OpenAI for Gemini seamlessly:
 var emb embedder.Embedder
 if config.GeminiAPIKey != "" {
-    emb = embedder.NewGeminiEmbedder(config.GeminiAPIKey, "text-embedding-004")
+    emb = embedder.NewGeminiEmbedder(config.GeminiAPIKey, "gemini-embedding-2")
 } else {
     emb = embedder.NewOpenAIEmbedder(config.OpenAIAPIKey, ...)
 }

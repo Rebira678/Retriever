@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -36,7 +37,7 @@ func WithGeminiHTTPClient(client HTTPClient) GeminiOption {
 // NewGeminiEmbedder creates a new GeminiEmbedder for the free Gemini API.
 func NewGeminiEmbedder(apiKey, model string, opts ...GeminiOption) *GeminiEmbedder {
 	if model == "" {
-		model = "text-embedding-004"
+		model = "gemini-embedding-2"
 	}
 	// Gemini API format
 	apiURL := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:embedContent?key=%s", model, apiKey)
@@ -115,7 +116,8 @@ func (e *GeminiEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (mo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return models.Embedding{}, fmt.Errorf("gemini api error (status %d)", resp.StatusCode)
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return models.Embedding{}, fmt.Errorf("gemini api error (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var result geminiEmbedResponse
