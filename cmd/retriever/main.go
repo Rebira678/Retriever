@@ -76,8 +76,16 @@ research tools to medical diagnosis assistants.`
 	}
 
 	// ─── Demo: Concurrent Embedding with Worker Pool ───────────────────────────────
-	if cfg.OpenAIAPIKey != "" {
-		emb := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingAPIURL, cfg.EmbeddingModel)
+	var emb embedder.Embedder
+	if cfg.GeminiAPIKey != "" {
+		slog.Info("Using Gemini Embedder")
+		emb = embedder.NewGeminiEmbedder(cfg.GeminiAPIKey, "text-embedding-004")
+	} else if cfg.OpenAIAPIKey != "" {
+		slog.Info("Using OpenAI Embedder")
+		emb = embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingAPIURL, cfg.EmbeddingModel)
+	}
+
+	if emb != nil {
 		pool := pipeline.NewEmbedPool(emb, pipeline.WithWorkers(cfg.WorkerPoolSize))
 
 		// Set up channels with backpressure
@@ -112,7 +120,7 @@ research tools to medical diagnosis assistants.`
 		slog.Info("Concurrent embedding completed successfully", "total_embeddings_generated", embeddedCount)
 
 	} else {
-		slog.Info("Skipping concurrent embedding generation (RETRIEVER_OPENAI_API_KEY is not set)")
+		slog.Info("Skipping concurrent embedding generation (neither RETRIEVER_GEMINI_API_KEY nor RETRIEVER_OPENAI_API_KEY is set)")
 	}
 
 	// ─── Graceful Shutdown ──────────────────────────────────────────────

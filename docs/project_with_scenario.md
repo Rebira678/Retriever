@@ -410,6 +410,41 @@ Customer: "How do I reset my password?"
 
 ---
 
+## Scenario 11: The Embedder Interface
+### The Interchangeable Translators 🗣️
+
+**Imagine this:**
+
+You run a global business. You need all your English documents translated to French. You hire a translator named OpenAI. 
+
+**Without an Interface (Tight Coupling):**
+> You build your entire office around OpenAI. Your forms only accept OpenAI's specific handwriting. Your filing cabinets are sized exactly for OpenAI's paper. 
+> One day, OpenAI becomes too expensive, and you want to hire a free translator named Gemini. You have to tear down your entire office and rebuild it because it only works with OpenAI.
+
+**With an Interface (Decoupling):**
+> You define a standard `Translator` job description: "Takes English text, returns French text." You don't care *how* they do it.
+> You give OpenAI a standard desk. When you want to switch to Gemini, you just tell Gemini to sit at that desk and follow the same job description. Your office doesn't change at all.
+
+**In Go code:**
+```go
+// The standard job description (Interface)
+type Embedder interface {
+    EmbedChunk(ctx context.Context, chunk Chunk) (Embedding, error)
+}
+
+// In our pipeline, we just use the interface. We don't care who the translator is!
+// When the user provides a Gemini key, we swap out OpenAI for Gemini seamlessly:
+var emb embedder.Embedder
+if config.GeminiAPIKey != "" {
+    emb = embedder.NewGeminiEmbedder(config.GeminiAPIKey, "text-embedding-004")
+} else {
+    emb = embedder.NewOpenAIEmbedder(config.OpenAIAPIKey, ...)
+}
+```
+This is why interfaces are the most powerful feature in Go. They make systems future-proof.
+
+---
+
 ## Day-by-Day Scenario Map
 
 Here's how each remaining day connects to a real scenario:

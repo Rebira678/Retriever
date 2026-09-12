@@ -34,6 +34,9 @@ type Config struct {
 	// OpenAIAPIKey is the API key for OpenAI.
 	OpenAIAPIKey string
 
+	// GeminiAPIKey is the API key for Google's Gemini.
+	GeminiAPIKey string
+
 	// EmbeddingAPIURL is the endpoint for embeddings API.
 	EmbeddingAPIURL string
 
@@ -61,6 +64,7 @@ func Default() *Config {
 		EmbeddingModel:     "text-embedding-3-small",
 		EmbeddingDimension: 1536,
 		OpenAIAPIKey:       "",
+		GeminiAPIKey:       "",
 		EmbeddingAPIURL:    "https://api.openai.com/v1/embeddings",
 		WorkerPoolSize:     4,
 		DatabaseURL:        "postgres://retriever:retriever@localhost:5432/retriever?sslmode=disable",
@@ -96,6 +100,9 @@ func FromEnv() *Config {
 	}
 	if v := os.Getenv("RETRIEVER_OPENAI_API_KEY"); v != "" {
 		cfg.OpenAIAPIKey = v
+	}
+	if v := os.Getenv("RETRIEVER_GEMINI_API_KEY"); v != "" {
+		cfg.GeminiAPIKey = v
 	}
 	if v := os.Getenv("RETRIEVER_EMBEDDING_API_URL"); v != "" {
 		cfg.EmbeddingAPIURL = v
