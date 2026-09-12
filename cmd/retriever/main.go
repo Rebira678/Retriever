@@ -78,11 +78,11 @@ research tools to medical diagnosis assistants.`
 	// ─── Demo: Concurrent Embedding with Worker Pool ───────────────────────────────
 	if cfg.OpenAIAPIKey != "" {
 		emb := embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingAPIURL, cfg.EmbeddingModel)
-		pool := pipeline.NewEmbedPool(emb, cfg.WorkerPoolSize)
+		pool := pipeline.NewEmbedPool(emb, pipeline.WithWorkers(cfg.WorkerPoolSize))
 
 		// Set up channels with backpressure
 		chunkChan := make(chan models.Chunk, len(chunks))
-		embeddingChan := make(chan models.Embedding, len(chunks))
+		resultsChan := make(chan pipeline.EmbedResult, len(chunks))
 
 		// Feed chunks into the pipeline
 		for _, chunk := range chunks {
@@ -93,15 +93,20 @@ research tools to medical diagnosis assistants.`
 		slog.Info("Starting concurrent embedding worker pool...", "workers", cfg.WorkerPoolSize)
 
 		// Run the worker pool (blocks until all chunks are embedded)
-		pool.Run(context.Background(), chunkChan, embeddingChan)
+		pool.Run(context.Background(), chunkChan, resultsChan)
 
 		// Read the results
 		var embeddedCount int
-		for embResult := range embeddingChan {
+		for res := range resultsChan {
+			if res.Err != nil {
+				slog.Error("Failed to embed chunk", "chunk_index", res.Chunk.Index, "error", res.Err)
+				continue
+			}
+			
 			embeddedCount++
 			if embeddedCount == 1 {
 				fmt.Printf("\n─── First Chunk Embedding (Sample) ───\n[%f, %f, %f, ...]\n",
-					embResult.Vector[0], embResult.Vector[1], embResult.Vector[2])
+					res.Embedding.Vector[0], res.Embedding.Vector[1], res.Embedding.Vector[2])
 			}
 		}
 		slog.Info("Concurrent embedding completed successfully", "total_embeddings_generated", embeddedCount)

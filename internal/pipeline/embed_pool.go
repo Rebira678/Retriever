@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -10,73 +9,89 @@ import (
 	"github.com/Rebira678/Retriever/internal/models"
 )
 
-// EmbedPool manages a pool of workers that embed chunks concurrently.
-// It acts as a backpressure-aware pipeline stage.
+// EmbedResult encapsulates the output of the embedding stage.
+// It wraps both the successful Embedding and any errors, allowing downstream
+// consumers (like a Dead Letter Queue) to handle failures gracefully rather
+// than silently dropping data on the floor.
+type EmbedResult struct {
+	Embedding models.Embedding
+	Err       error
+	Chunk     models.Chunk // Kept for retry logic downstream
+}
+
+// EmbedPool orchestrates concurrent embedding of document chunks.
 type EmbedPool struct {
 	embedder   embedder.Embedder
 	numWorkers int
 }
 
-// NewEmbedPool creates a new EmbedPool with the given embedder and worker count.
-func NewEmbedPool(emb embedder.Embedder, numWorkers int) *EmbedPool {
-	if numWorkers <= 0 {
-		numWorkers = 1
-	}
-	return &EmbedPool{
-		embedder:   emb,
-		numWorkers: numWorkers,
+// PoolOption applies configuration to an EmbedPool.
+type PoolOption func(*EmbedPool)
+
+// WithWorkers configures the number of concurrent workers in the pool.
+func WithWorkers(n int) PoolOption {
+	return func(p *EmbedPool) {
+		if n > 0 {
+			p.numWorkers = n
+		}
 	}
 }
 
-// Run starts the worker pool. It reads chunks from chunkChan, embeds them,
-// and sends the resulting embeddings to embeddingChan.
-// It blocks until chunkChan is closed and all workers finish, then it closes embeddingChan.
-func (p *EmbedPool) Run(ctx context.Context, chunkChan <-chan models.Chunk, embeddingChan chan<- models.Embedding) {
+// NewEmbedPool initializes a worker pool using the functional options pattern.
+func NewEmbedPool(emb embedder.Embedder, opts ...PoolOption) *EmbedPool {
+	p := &EmbedPool{
+		embedder:   emb,
+		numWorkers: 4, // Sensible default throughput
+	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+// Run executes the worker pool, reading from chunksIn and writing to resultsOut.
+// It blocks until chunksIn is closed and all workers have cleanly shut down.
+func (p *EmbedPool) Run(ctx context.Context, chunksIn <-chan models.Chunk, resultsOut chan<- EmbedResult) {
 	var wg sync.WaitGroup
+	wg.Add(p.numWorkers)
 
 	for i := 0; i < p.numWorkers; i++ {
-		wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer wg.Done()
 			for {
 				select {
 				case <-ctx.Done():
-					// Context cancelled, stop worker
+					// Context cancelled, initiate clean shutdown
 					return
-				case chunk, ok := <-chunkChan:
+				case chunk, ok := <-chunksIn:
 					if !ok {
-						// chunkChan closed, no more work
+						// Channel closed, drain complete
 						return
 					}
-					
-					// Embed the chunk
-					emb, err := p.embedder.EmbedChunk(ctx, chunk)
-					if err != nil {
-						// For now, log the error and drop the chunk.
-						// Day 39 will introduce a Dead Letter Queue (DLQ) for failed embeddings.
-						slog.Error("Worker failed to embed chunk", "worker_id", workerID, "chunk_index", chunk.Index, "error", err)
-						continue
-					}
 
-					// Ensure timestamp is set
-					if emb.CreatedAt.IsZero() {
+					emb, err := p.embedder.EmbedChunk(ctx, chunk)
+					if err == nil && emb.CreatedAt.IsZero() {
 						emb.CreatedAt = time.Now()
 					}
 
-					// Send the embedding to the next stage
+					res := EmbedResult{
+						Embedding: emb,
+						Err:       err,
+						Chunk:     chunk,
+					}
+
+					// Route the result downstream with context awareness
 					select {
 					case <-ctx.Done():
 						return
-					case embeddingChan <- emb:
-						// Successfully sent to the next stage
+					case resultsOut <- res:
 					}
 				}
 			}
-		}(i)
+		}()
 	}
 
-	// Wait for all workers to finish processing
+	// Wait for all workers to finish processing their current chunks
 	wg.Wait()
-	// Close the output channel to signal downstream stages that embedding is complete
-	close(embeddingChan)
+	close(resultsOut)
 }

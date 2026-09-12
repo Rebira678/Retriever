@@ -5,16 +5,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Rebira678/Retriever/internal/models"
 )
 
+// HTTPClient defines the interface required for making HTTP requests.
+// This allows for zero-network mocking in tests and custom client injection.
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 // Embedder defines the interface for generating vector embeddings from text.
 type Embedder interface {
-	// EmbedChunk takes a single Chunk and returns an Embedding.
 	EmbedChunk(ctx context.Context, chunk models.Chunk) (models.Embedding, error)
 }
 
@@ -23,20 +28,54 @@ type OpenAIEmbedder struct {
 	apiKey     string
 	apiURL     string
 	model      string
-	httpClient *http.Client
+	httpClient HTTPClient
+
+	// bufPool reduces heap allocations during JSON marshaling,
+	// which is critical for high-throughput pipeline stages.
+	bufPool *sync.Pool
 }
 
-// NewOpenAIEmbedder creates a new OpenAIEmbedder.
-func NewOpenAIEmbedder(apiKey, apiURL, model string) *OpenAIEmbedder {
+// Option defines a functional option for configuring OpenAIEmbedder.
+type Option func(*OpenAIEmbedder)
+
+// WithHTTPClient allows injecting a custom HTTPClient.
+func WithHTTPClient(client HTTPClient) Option {
+	return func(e *OpenAIEmbedder) {
+		e.httpClient = client
+	}
+}
+
+// NewOpenAIEmbedder creates a new OpenAIEmbedder utilizing functional options
+// for extensibility and a tuned http.Transport for connection reuse.
+func NewOpenAIEmbedder(apiKey, apiURL, model string, opts ...Option) *OpenAIEmbedder {
 	if apiURL == "" {
 		apiURL = "https://api.openai.com/v1/embeddings"
 	}
-	return &OpenAIEmbedder{
-		apiKey:     apiKey,
-		apiURL:     apiURL,
-		model:      model,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+
+	e := &OpenAIEmbedder{
+		apiKey: apiKey,
+		apiURL: apiURL,
+		model:  model,
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100, // Crucial for concurrent API calls
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
+		bufPool: &sync.Pool{
+			New: func() interface{} {
+				return new(bytes.Buffer)
+			},
+		},
 	}
+
+	for _, opt := range opts {
+		opt(e)
+	}
+
+	return e
 }
 
 // embedRequest is the payload sent to the API.
@@ -55,19 +94,23 @@ type embedResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// EmbedChunk implements the Embedder interface.
+// EmbedChunk executes the network request to fetch vector embeddings.
 func (e *OpenAIEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (models.Embedding, error) {
+	// Borrow a buffer from the pool to avoid allocating a new byte slice per chunk.
+	buf := e.bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer e.bufPool.Put(buf)
+
 	reqBody := embedRequest{
 		Input: chunk.Text,
 		Model: e.model,
 	}
 
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return models.Embedding{}, fmt.Errorf("failed to marshal request: %w", err)
+	if err := json.NewEncoder(buf).Encode(reqBody); err != nil {
+		return models.Embedding{}, fmt.Errorf("failed to encode request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", e.apiURL, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.apiURL, buf)
 	if err != nil {
 		return models.Embedding{}, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -83,18 +126,14 @@ func (e *OpenAIEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (mo
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return models.Embedding{}, fmt.Errorf("failed to read response body: %w", err)
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		return models.Embedding{}, fmt.Errorf("api error (status %d): %s", resp.StatusCode, string(respBody))
+		return models.Embedding{}, fmt.Errorf("api error (status %d)", resp.StatusCode)
 	}
 
 	var result embedResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return models.Embedding{}, fmt.Errorf("failed to unmarshal response: %w", err)
+	// Stream the decode directly from the body to avoid reading the whole payload into memory
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return models.Embedding{}, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	if result.Error != nil {
