@@ -141,6 +141,28 @@ research tools to medical diagnosis assistants.`
 			} else {
 				slog.Info("Successfully saved embeddings to pgvector!", "count", len(generatedEmbeddings))
 			}
+
+			// ─── Demo: Similarity Search ─────────────────────────────────────────────
+			query := "What is the second phase of the RAG pipeline?"
+			slog.Info("Embedding search query...", "query", query)
+			
+			queryChunk := models.Chunk{Text: query, Index: 0, DocumentID: "query"}
+			queryEmbedding, err := emb.EmbedChunk(context.Background(), queryChunk)
+			if err != nil {
+				slog.Error("Failed to embed query", "error", err)
+			} else {
+				slog.Info("Searching for most similar chunks...")
+				results, err := store.SearchSimilar(context.Background(), queryEmbedding.Vector, 2)
+				if err != nil {
+					slog.Error("Search failed", "error", err)
+				} else {
+					fmt.Println("\n─── Search Results ───")
+					for i, res := range results {
+						fmt.Printf("%d. [Score: %.3f] (Doc: %s, Chunk: %d)\n%s\n\n", 
+							i+1, res.Score, res.DocumentID, res.ChunkIndex, res.ChunkText)
+					}
+				}
+			}
 		}
 
 	} else {

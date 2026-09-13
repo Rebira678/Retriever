@@ -60,6 +60,9 @@ type Embedding struct {
 	// ChunkIndex is the index of the chunk this embedding represents.
 	ChunkIndex int `json:"chunk_index"`
 
+	// Text is the actual content of the chunk, saved alongside the vector.
+	Text string `json:"text"`
+
 	// DocumentID links back to the source document.
 	DocumentID string `json:"document_id"`
 
