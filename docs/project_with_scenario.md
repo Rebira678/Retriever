@@ -16,6 +16,8 @@ This document explains every concept in the Retriever RAG pipeline using real-wo
 8. [Vector Search — Finding Your Neighbor](#scenario-8-vector-search)
 9. [Idempotency — The Package Delivery](#scenario-9-idempotency)
 10. [The Full Flow — A Customer Support Bot](#scenario-10-the-full-flow)
+11. [The Embedder Interface — The Interchangeable Translators](#scenario-11-the-embedder-interface)
+12. [gRPC and Resilient Systems — The Drive-Thru Window](#scenario-12-grpc-and-resilient-systems)
 
 ---
 
@@ -445,6 +447,28 @@ This is why interfaces are the most powerful feature in Go. They make systems fu
 
 ---
 
+## Scenario 12: gRPC and Resilient Systems
+### The Drive-Thru Window 🚗
+
+**Imagine this:**
+
+You run a fast-food restaurant with a drive-thru window. This window is how external customers (other microservices) talk to your kitchen (the vector database). 
+
+**The Junior Approach (REST + No Timeouts):**
+> A customer pulls up to the window and speaks English (JSON). The cashier has to translate English into kitchen shorthand (serialization). 
+> The customer orders a burger, but the grill is broken. The cashier just stands there staring at the kitchen forever. The customer waits forever. The line behind them wraps around the block. Eventually, the entire restaurant shuts down.
+
+**The Expert Approach (gRPC + Errgroup + Interceptors):**
+> 1. **gRPC (Binary Protocol):** The customer pulls up and punches their order directly into a digital keypad using kitchen shorthand (Protobuf). No translation needed. It's instantly beamed to the kitchen. Lightning fast.
+> 2. **Context Deadlines (Timeouts):** The cashier tells the kitchen, "You have exactly 5 seconds to make this burger." If the grill is broken and 5 seconds pass, the cashier immediately tells the customer, "Sorry, we can't fulfill this right now," and takes the next order. No line backs up.
+> 3. **Interceptors (Middleware):** A safety inspector (Recovery Interceptor) stands behind the cashier. If the kitchen catches on fire (a panic), the inspector safely extinguishes it, apologizes to the customer, and keeps the window open for the next car. The restaurant doesn't burn down.
+> 4. **Errgroup (Lifecycle):** If the restaurant *must* close for the night, the manager (Errgroup) ensures all current cars finish getting their food before locking the doors (Graceful Shutdown). No one is left stranded.
+
+**In Go code:**
+This is exactly why we built the Day 34 Search API using `gRPC` over REST, enforced `context.WithTimeout`, chained `RecoveryInterceptor`, and wrapped the server in an `errgroup` in `main.go`. It turns a fragile endpoint into an industrial-grade drive-thru.
+
+---
+
 ## Day-by-Day Scenario Map
 
 Here's how each remaining day connects to a real scenario:
@@ -508,6 +532,21 @@ Here's how each remaining day connects to a real scenario:
 - ✅ Sufficient for most document types
 - ⚠️ May split mid-sentence (acceptable trade-off for Day 1)
 - 📋 TODO: Add sentence-aware chunking in Week 6+
+
+### ADR-003: gRPC and Resilient Lifecycle Management for Search API
+
+**Status:** Accepted  
+**Date:** 2026-09-14 (Day 34)  
+**Context:** We need to expose the vector search capabilities to other internal microservices. The endpoint will transmit large float arrays (embeddings) and requires high resilience against upstream timeouts or panics.
+
+**Decision:** Implement the Search API using gRPC/Protobuf. Manage the server lifecycle using `errgroup` for synchronized graceful shutdowns. Chain Unary Interceptors for logging and panic recovery. Enforce context deadlines defensively.
+
+**Consequences:**
+- ✅ Binary serialization (Protobuf) vastly reduces CPU overhead compared to JSON.
+- ✅ HTTP/2 multiplexing allows high concurrency.
+- ✅ `errgroup` eliminates orphaned goroutines and ensures clean shutdowns.
+- ✅ Interceptors protect the main process from crashing due to unexpected panics.
+- ⚠️ gRPC requires compiled client stubs, slightly increasing integration complexity over standard REST APIs.
 
 ---
 
