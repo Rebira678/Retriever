@@ -20,7 +20,12 @@ import (
 	"github.com/Rebira678/Retriever/internal/embedder"
 	"github.com/Rebira678/Retriever/internal/models"
 	"github.com/Rebira678/Retriever/internal/pipeline"
+	"github.com/Rebira678/Retriever/internal/server"
 	"github.com/Rebira678/Retriever/internal/storage"
+	searchv1 "github.com/Rebira678/Retriever/pkg/api/search/v1"
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
+	"net"
 
 	_ "github.com/joho/godotenv/autoload"
 )
@@ -34,7 +39,7 @@ func main() {
 
 	slog.Info("🚀 Retriever RAG Ingestion Pipeline starting",
 		"version", "0.1.0",
-		"day", 29,
+		"day", 34,
 	)
 
 	// ─── Load Configuration ─────────────────────────────────────────────
@@ -131,6 +136,7 @@ research tools to medical diagnosis assistants.`
 		}
 
 		slog.Info("Connecting to PostgreSQL to save vectors...", "url", cfg.DatabaseURL, "detected_dimension", actualDimension)
+		var store storage.Storage
 		store, err := storage.NewPostgresStorage(context.Background(), cfg.DatabaseURL, actualDimension)
 		if err != nil {
 			slog.Error("Failed to connect to database", "error", err)
@@ -162,6 +168,48 @@ research tools to medical diagnosis assistants.`
 							i+1, res.Score, res.DocumentID, res.ChunkIndex, res.ChunkText)
 					}
 				}
+			}
+			
+			// ─── Start gRPC Server ──────────────────────────────────────────────
+			lis, err := net.Listen("tcp", ":50051")
+			if err != nil {
+				slog.Error("Failed to listen for gRPC", "error", err)
+			} else {
+				grpcServer := grpc.NewServer(
+					grpc.ChainUnaryInterceptor(
+						server.LoggingInterceptor(slog.Default()),
+						server.RecoveryInterceptor(slog.Default()),
+					),
+				)
+				searchSrv := server.NewSearchServer(store, emb, server.WithLogger(slog.Default()))
+				searchv1.RegisterSearchServiceServer(grpcServer, searchSrv)
+
+				// Use errgroup for decoupled lifecycle management
+				g, gCtx := errgroup.WithContext(context.Background())
+				ctx, stop := signal.NotifyContext(gCtx, syscall.SIGINT, syscall.SIGTERM)
+				defer stop()
+
+				g.Go(func() error {
+					slog.Info("Starting gRPC search server", "port", 50051)
+					if err := grpcServer.Serve(lis); err != nil {
+						return fmt.Errorf("gRPC server failed: %w", err)
+					}
+					return nil
+				})
+
+				g.Go(func() error {
+					<-ctx.Done()
+					slog.Info("Shutting down gRPC server gracefully...")
+					grpcServer.GracefulStop()
+					return nil
+				})
+
+				slog.Info("Retriever is ready. Press Ctrl+C to exit.")
+				if err := g.Wait(); err != nil {
+					slog.Error("Server exited with error", "error", err)
+				}
+				slog.Info("Retriever shutdown complete.")
+				return
 			}
 		}
 
