@@ -16,7 +16,18 @@ type Storage interface {
 
 	// SearchSimilar performs a vector similarity search to find the topK closest chunks.
 	SearchSimilar(ctx context.Context, queryEmbedding []float32, topK int) ([]models.SearchResult, error)
+
+	// StartIngestion attempts to acquire an idempotency lock for a document hash.
+	// Returns true if the lock was acquired (document is new/failed previously), or false if it's already processing/completed.
+	StartIngestion(ctx context.Context, hash, documentID string) (bool, error)
+
+	// CompleteIngestion updates the idempotency record to reflect the final state (COMPLETED or FAILED).
+	CompleteIngestion(ctx context.Context, hash string, status models.IngestionStatus) error
+
+	// SaveDeadLetters persists a batch of failed chunks to the dead-letter queue efficiently.
+	SaveDeadLetters(ctx context.Context, dlqs []models.DeadLetter) error
 	
 	// Close gracefully shuts down the database connection.
 	Close() error
 }
+
