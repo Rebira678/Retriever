@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/Rebira678/Retriever/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -56,6 +57,34 @@ func initializeSchema(ctx context.Context, pool *pgxpool.Pool, dimension int) er
 
 	_, err := pool.Exec(ctx, createTableSQL)
 	if err != nil {
+		return err
+	}
+
+	// Create idempotency tracking table
+	createIdempotencySQL := `
+		CREATE TABLE IF NOT EXISTS ingested_documents (
+			hash TEXT PRIMARY KEY,
+			document_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		);
+	`
+	if _, err := pool.Exec(ctx, createIdempotencySQL); err != nil {
+		return err
+	}
+
+	// Create dead-letter queue table
+	createDLQSQL := `
+		CREATE TABLE IF NOT EXISTS dead_letters (
+			id SERIAL PRIMARY KEY,
+			document_id TEXT NOT NULL,
+			chunk_index INT NOT NULL,
+			error_message TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		);
+	`
+	if _, err := pool.Exec(ctx, createDLQSQL); err != nil {
 		return err
 	}
 
@@ -140,6 +169,84 @@ func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []fl
 	}
 
 	return results, nil
+}
+
+// StartIngestion attempts to lock the document hash for processing.
+// Returns true if the lock is acquired (i.e., document is new or previously failed),
+// and false if the document is already in progress or completed.
+func (s *PostgresStorage) StartIngestion(ctx context.Context, hash, documentID string) (bool, error) {
+	query := `
+		INSERT INTO ingested_documents (hash, document_id, status)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (hash) DO UPDATE 
+		SET status = $3, created_at = CURRENT_TIMESTAMP
+		WHERE ingested_documents.status = $4
+		RETURNING hash;
+	`
+	// We only want to acquire if it doesn't exist, OR if it exists but failed previously.
+	// The ON CONFLICT DO UPDATE WHERE status = 'FAILED' allows retry.
+	// If it's already 'STARTED' or 'COMPLETED', the WHERE clause fails, returning no rows.
+	
+	var returnedHash string
+	err := s.pool.QueryRow(ctx, query, hash, documentID, string(models.StatusStarted), string(models.StatusFailed)).Scan(&returnedHash)
+	
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			// Lock not acquired: it's already processing or completed.
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to acquire idempotency lock: %w", err)
+	}
+	
+	return true, nil
+}
+
+// CompleteIngestion transitions a document's status to COMPLETED or FAILED.
+func (s *PostgresStorage) CompleteIngestion(ctx context.Context, hash string, status models.IngestionStatus) error {
+	query := `
+		UPDATE ingested_documents
+		SET status = $1
+		WHERE hash = $2
+	`
+	tag, err := s.pool.Exec(ctx, query, string(status), hash)
+	if err != nil {
+		return fmt.Errorf("failed to update ingestion status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("idempotency record not found for hash: %s", hash)
+	}
+	return nil
+}
+
+// SaveDeadLetters writes a batch of failed items to the DLQ table efficiently.
+func (s *PostgresStorage) SaveDeadLetters(ctx context.Context, dlqs []models.DeadLetter) error {
+	if len(dlqs) == 0 {
+		return nil
+	}
+
+	batch := &pgx.Batch{}
+	query := `
+		INSERT INTO dead_letters (document_id, chunk_index, error_message, payload, created_at)
+		VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_TIMESTAMP))
+	`
+	
+	for _, dl := range dlqs {
+		createdAt := dl.CreatedAt
+		if createdAt.IsZero() {
+			createdAt = time.Now()
+		}
+		batch.Queue(query, dl.DocumentID, dl.ChunkIndex, dl.Error, dl.Payload, createdAt)
+	}
+
+	br := s.pool.SendBatch(ctx, batch)
+	defer br.Close()
+
+	for i := 0; i < len(dlqs); i++ {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("failed to save dead letter at index %d: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // Close gracefully shuts down the database connection pool.
