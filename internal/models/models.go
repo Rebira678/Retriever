@@ -90,3 +90,33 @@ type SearchResult struct {
 	// ChunkIndex is the position of this chunk in the original document.
 	ChunkIndex int `json:"chunk_index"`
 }
+
+// IngestionStatus defines the current state of a document in the idempotency store.
+type IngestionStatus string
+
+const (
+	StatusStarted   IngestionStatus = "STARTED"
+	StatusCompleted IngestionStatus = "COMPLETED"
+	StatusFailed    IngestionStatus = "FAILED"
+)
+
+// DeadLetter represents a failed ingestion or embedding task that couldn't be processed.
+type DeadLetter struct {
+	// ID is the unique identifier for the dead letter entry.
+	ID string `json:"id"`
+
+	// DocumentID links back to the source document, if known.
+	DocumentID string `json:"document_id"`
+
+	// ChunkIndex is the index of the chunk that failed, if applicable.
+	ChunkIndex int `json:"chunk_index"`
+
+	// Error is the stringified error message explaining why processing failed.
+	Error string `json:"error"`
+
+	// Payload is the raw data (e.g., chunk text) that caused the failure.
+	Payload string `json:"payload"`
+
+	// CreatedAt is the timestamp when the failure occurred.
+	CreatedAt time.Time `json:"created_at"`
+}
