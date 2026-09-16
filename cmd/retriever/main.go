@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"os"
@@ -39,7 +40,7 @@ func main() {
 
 	slog.Info("🚀 Retriever RAG Ingestion Pipeline starting",
 		"version", "0.1.0",
-		"day", 34,
+		"day", 36,
 	)
 
 	// ─── Load Configuration ─────────────────────────────────────────────
@@ -98,57 +99,92 @@ research tools to medical diagnosis assistants.`
 	if emb != nil {
 		pool := pipeline.NewEmbedPool(emb, pipeline.WithWorkers(cfg.WorkerPoolSize))
 
-		// Set up channels with backpressure
-		chunkChan := make(chan models.Chunk, len(chunks))
-		resultsChan := make(chan pipeline.EmbedResult, len(chunks))
-
-		// Feed chunks into the pipeline
-		for _, chunk := range chunks {
-			chunkChan <- chunk
-		}
-		close(chunkChan)
-
-		slog.Info("Starting concurrent embedding worker pool...", "workers", cfg.WorkerPoolSize)
-
-		// Run the worker pool (blocks until all chunks are embedded)
-		pool.Run(context.Background(), chunkChan, resultsChan)
-
-		// Read the results into a slice for batch saving
-		var generatedEmbeddings []models.Embedding
-		for res := range resultsChan {
-			if res.Err != nil {
-				slog.Error("Failed to embed chunk", "chunk_index", res.Chunk.Index, "error", res.Err)
-				continue
-			}
-			
-			generatedEmbeddings = append(generatedEmbeddings, res.Embedding)
-			if len(generatedEmbeddings) == 1 {
-				fmt.Printf("\n─── First Chunk Embedding (Sample) ───\n[%f, %f, %f, ...]\n",
-					res.Embedding.Vector[0], res.Embedding.Vector[1], res.Embedding.Vector[2])
-			}
-		}
-		slog.Info("Concurrent embedding completed successfully", "total_embeddings_generated", len(generatedEmbeddings))
-
-		// ─── Demo: Save to PostgreSQL (pgvector) ──────────────────────────────────
-		actualDimension := dimension
-		if len(generatedEmbeddings) > 0 {
-			actualDimension = len(generatedEmbeddings[0].Vector)
-		}
-
-		slog.Info("Connecting to PostgreSQL to save vectors...", "url", cfg.DatabaseURL, "detected_dimension", actualDimension)
+		// Initialize Database Connection earlier to support Idempotency & DLQ during embedding
+		slog.Info("Connecting to PostgreSQL...", "url", cfg.DatabaseURL, "dimension", dimension)
 		var store storage.Storage
-		store, err := storage.NewPostgresStorage(context.Background(), cfg.DatabaseURL, actualDimension)
+		store, err := storage.NewPostgresStorage(context.Background(), cfg.DatabaseURL, dimension)
 		if err != nil {
 			slog.Error("Failed to connect to database", "error", err)
+			return
+		}
+		defer store.Close()
+
+		docHash := fmt.Sprintf("%x", sha256.Sum256([]byte(sampleDoc)))
+		docID := "sample-doc-rag"
+		
+		// Check for Idempotency using StartIngestion (atomic lock)
+		acquired, err := store.StartIngestion(context.Background(), docHash, docID)
+		if err != nil {
+			slog.Error("Failed to check idempotency", "error", err)
+			return
+		}
+
+		if !acquired {
+			slog.Info("Document already ingested or in progress (Idempotency hit), skipping processing", "hash", docHash, "document_id", docID)
 		} else {
-			defer store.Close()
-			if err := store.SaveEmbeddings(context.Background(), generatedEmbeddings); err != nil {
-				slog.Error("Failed to save embeddings to database", "error", err)
-			} else {
-				slog.Info("Successfully saved embeddings to pgvector!", "count", len(generatedEmbeddings))
+			// Set up channels with backpressure
+			chunkChan := make(chan models.Chunk, len(chunks))
+			resultsChan := make(chan pipeline.EmbedResult, len(chunks))
+
+			// Feed chunks into the pipeline
+			for _, chunk := range chunks {
+				chunk.DocumentID = docID // Link chunk to document ID for DLQ
+				chunkChan <- chunk
+			}
+			close(chunkChan)
+
+			slog.Info("Starting concurrent embedding worker pool...", "workers", cfg.WorkerPoolSize)
+			pool.Run(context.Background(), chunkChan, resultsChan)
+
+			var generatedEmbeddings []models.Embedding
+			var deadLetters []models.DeadLetter
+
+			for res := range resultsChan {
+				if res.Err != nil {
+					slog.Error("Failed to embed chunk", "chunk_index", res.Chunk.Index, "error", res.Err)
+					deadLetters = append(deadLetters, models.DeadLetter{
+						DocumentID: docID,
+						ChunkIndex: res.Chunk.Index,
+						Error:      res.Err.Error(),
+						Payload:    res.Chunk.Text,
+					})
+					continue
+				}
+				
+				generatedEmbeddings = append(generatedEmbeddings, res.Embedding)
+				if len(generatedEmbeddings) == 1 {
+					fmt.Printf("\n─── First Chunk Embedding (Sample) ───\n[%f, %f, %f, ...]\n",
+						res.Embedding.Vector[0], res.Embedding.Vector[1], res.Embedding.Vector[2])
+				}
+			}
+			slog.Info("Concurrent embedding completed", "total", len(generatedEmbeddings))
+
+			// Process Dead-Letters efficiently in batch
+			if len(deadLetters) > 0 {
+				if err := store.SaveDeadLetters(context.Background(), deadLetters); err != nil {
+					slog.Error("Failed to save to Dead Letter Queue", "error", err)
+				} else {
+					slog.Info("Saved failed chunks to Dead Letter Queue", "count", len(deadLetters))
+				}
 			}
 
-			// ─── Demo: Similarity Search ─────────────────────────────────────────────
+			if len(generatedEmbeddings) > 0 {
+				if err := store.SaveEmbeddings(context.Background(), generatedEmbeddings); err != nil {
+					slog.Error("Failed to save embeddings to database", "error", err)
+					_ = store.CompleteIngestion(context.Background(), docHash, models.StatusFailed)
+				} else {
+					slog.Info("Successfully saved embeddings to pgvector!", "count", len(generatedEmbeddings))
+					if err := store.CompleteIngestion(context.Background(), docHash, models.StatusCompleted); err != nil {
+						slog.Error("Failed to mark document as completed", "error", err)
+					}
+				}
+			} else {
+				// If nothing was generated (all failed), mark as FAILED
+				_ = store.CompleteIngestion(context.Background(), docHash, models.StatusFailed)
+			}
+		}
+
+		// ─── Demo: Similarity Search ─────────────────────────────────────────────
 			query := "What is the second phase of the RAG pipeline?"
 			slog.Info("Embedding search query...", "query", query)
 			
@@ -211,7 +247,6 @@ research tools to medical diagnosis assistants.`
 				slog.Info("Retriever shutdown complete.")
 				return
 			}
-		}
 
 	} else {
 		slog.Info("Skipping concurrent embedding generation (neither RETRIEVER_GEMINI_API_KEY nor RETRIEVER_OPENAI_API_KEY is set)")
