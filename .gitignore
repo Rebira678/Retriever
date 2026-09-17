@@ -29,4 +29,4 @@ Thumbs.db
 .env.local
 roadmap_text.txt
 docs/
-retriever
+/retriever

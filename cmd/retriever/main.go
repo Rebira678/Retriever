@@ -88,12 +88,19 @@ research tools to medical diagnosis assistants.`
 	var emb embedder.Embedder
 	dimension := cfg.EmbeddingDimension
 
+	var provider string
+	var modelName string
+
 	if cfg.GeminiAPIKey != "" {
 		slog.Info("Using Gemini Embedder")
 		emb = embedder.NewGeminiEmbedder(cfg.GeminiAPIKey, "gemini-embedding-2")
+		provider = "gemini"
+		modelName = "gemini-embedding-2"
 	} else if cfg.OpenAIAPIKey != "" {
 		slog.Info("Using OpenAI Embedder")
 		emb = embedder.NewOpenAIEmbedder(cfg.OpenAIAPIKey, cfg.EmbeddingAPIURL, cfg.EmbeddingModel)
+		provider = "openai"
+		modelName = cfg.EmbeddingModel
 	}
 
 	if emb != nil {
@@ -109,7 +116,8 @@ research tools to medical diagnosis assistants.`
 		}
 		defer store.Close()
 
-		docHash := fmt.Sprintf("%x", sha256.Sum256([]byte(sampleDoc)))
+		docHashRaw := fmt.Sprintf("%s:%s:%s", provider, modelName, sampleDoc)
+		docHash := fmt.Sprintf("%x", sha256.Sum256([]byte(docHashRaw)))
 		docID := "sample-doc-rag"
 		
 		// Check for Idempotency using StartIngestion (atomic lock)
