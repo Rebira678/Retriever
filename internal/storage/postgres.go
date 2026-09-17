@@ -259,15 +259,29 @@ func (s *PostgresStorage) Close() error {
 	return nil
 }
 
-// DeleteOldChunks performs garbage collection by deleting old chunks for a document that belong to a previous model.
-func (s *PostgresStorage) DeleteOldChunks(ctx context.Context, documentID string, currentModel string) error {
+// SweepOldChunks deletes orphaned vectors that belong to an older model,
+// but ONLY if the newer model's vectors have existed longer than the safeWindow.
+func (s *PostgresStorage) SweepOldChunks(ctx context.Context, safeWindow time.Duration) error {
 	query := `
 		DELETE FROM chunks
-		WHERE document_id = $1 AND model != $2
+		WHERE id IN (
+			SELECT old.id
+			FROM chunks old
+			JOIN chunks new ON old.document_id = new.document_id
+			WHERE old.model != new.model
+			  AND old.created_at < new.created_at
+			  AND new.created_at <= $1
+		)
 	`
-	_, err := s.pool.Exec(ctx, query, documentID, currentModel)
+	cutoff := time.Now().Add(-safeWindow)
+	tag, err := s.pool.Exec(ctx, query, cutoff)
 	if err != nil {
-		return fmt.Errorf("failed to delete old chunks for document %s: %w", documentID, err)
+		return fmt.Errorf("failed to sweep old chunks: %w", err)
+	}
+	
+	if tag.RowsAffected() > 0 {
+		// Log conditionally to avoid spamming the logs when nothing is deleted
+		fmt.Printf("🧹 [Garbage Collector] Swept %d old chunks (safely past rollback window)\n", tag.RowsAffected())
 	}
 	return nil
 }

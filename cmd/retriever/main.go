@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/Rebira678/Retriever/internal/chunker"
 	"github.com/Rebira678/Retriever/internal/config"
@@ -104,8 +105,22 @@ research tools to medical diagnosis assistants.`
 
 		// ─── Senior Level: Orchestrator Pattern ───────────────────────────
 		// Encapsulate the entire complex ingestion logic (Idempotency, 
-		// Garbage Collection, Channels, DLQ) into a single reusable Pipeline struct.
+		// Channels, DLQ) into a single reusable Pipeline struct.
 		p := pipeline.NewPipeline(cfg, store, emb, c)
+
+		// Start Background Garbage Collector (Delayed Sweeper)
+		go func() {
+			slog.Info("Starting background garbage collector (sweeps old chunks after 24h safety window)")
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for {
+				// Sweep chunks that are safely past the 24 hour rollback window
+				if err := store.SweepOldChunks(context.Background(), 24*time.Hour); err != nil {
+					slog.Warn("Background sweep encountered an error", "error", err)
+				}
+				<-ticker.C
+			}
+		}()
 
 		doc := models.Document{
 			ID:      "sample-doc-rag",

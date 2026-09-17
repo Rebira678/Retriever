@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"time"
 
 	"github.com/Rebira678/Retriever/internal/models"
 )
@@ -17,8 +18,8 @@ type Storage interface {
 	// SearchSimilar performs a vector similarity search to find the topK closest chunks, filtered by model to prevent vector space collisions.
 	SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int) ([]models.SearchResult, error)
 
-	// DeleteOldChunks performs garbage collection by deleting old vectors for a document that don't match the current model.
-	DeleteOldChunks(ctx context.Context, documentID string, currentModel string) error
+	// SweepOldChunks performs delayed garbage collection, deleting old vectors only after a new model has proven stable (safe window elapsed).
+	SweepOldChunks(ctx context.Context, safeWindow time.Duration) error
 
 	// StartIngestion attempts to acquire an idempotency lock for a document hash.
 	// Returns true if the lock was acquired (document is new/failed previously), or false if it's already processing/completed.
