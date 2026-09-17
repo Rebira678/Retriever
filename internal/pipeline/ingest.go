@@ -52,13 +52,7 @@ func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provid
 		return nil
 	}
 
-	// 3. Garbage Collection for older model vectors
-	slog.Info("Lock acquired. Running garbage collection for old models...", "document_id", doc.ID, "active_model", modelName)
-	if err := p.store.DeleteOldChunks(ctx, doc.ID, modelName); err != nil {
-		slog.Error("Failed to garbage collect old chunks", "error", err)
-	}
-
-	// 4. Backpressure Queues
+	// 3. Backpressure Queues
 	chunkChan := make(chan models.Chunk, p.cfg.IngestionQueueSize)
 	resultsChan := make(chan EmbedResult, p.cfg.IngestionQueueSize)
 
@@ -113,6 +107,16 @@ func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provid
 		}
 		
 		slog.Info("Successfully saved embeddings to pgvector!", "count", len(generatedEmbeddings))
+		
+		// 9a. Garbage Collection (After Verify)
+		// We sweep old models ONLY after the new write succeeds. 
+		// If we crash before this, the old data is still there (no silent holes).
+		slog.Info("Running garbage collection for old models after successful write...", "document_id", doc.ID, "active_model", modelName)
+		if err := p.store.DeleteOldChunks(ctx, doc.ID, modelName); err != nil {
+			slog.Warn("Failed to garbage collect old chunks (non-fatal)", "error", err)
+		}
+
+		// 9b. Mark Completed
 		if err := p.store.CompleteIngestion(ctx, docHash, models.StatusCompleted); err != nil {
 			slog.Error("Failed to mark document as completed", "error", err)
 			return err
