@@ -130,6 +130,14 @@ research tools to medical diagnosis assistants.`
 		if !acquired {
 			slog.Info("Document already ingested or in progress (Idempotency hit), skipping processing", "hash", docHash, "document_id", docID)
 		} else {
+			// Lock acquired! Before starting, delete any chunks for this document from older models
+			// to prevent vector space mixing / database bloat. (Garbage Collection)
+			slog.Info("Lock acquired. Running garbage collection for old models...", "document_id", docID, "active_model", modelName)
+			if err := store.DeleteOldChunks(context.Background(), docID, modelName); err != nil {
+				slog.Error("Failed to garbage collect old chunks", "error", err)
+				// We can continue, but it's a warning.
+			}
+
 			// Set up channels with backpressure (bounded queues)
 			chunkChan := make(chan models.Chunk, cfg.IngestionQueueSize)
 			resultsChan := make(chan pipeline.EmbedResult, cfg.IngestionQueueSize)
@@ -213,7 +221,7 @@ research tools to medical diagnosis assistants.`
 				slog.Error("Failed to embed query", "error", err)
 			} else {
 				slog.Info("Searching for most similar chunks...")
-				results, err := store.SearchSimilar(context.Background(), queryEmbedding.Vector, 2)
+				results, err := store.SearchSimilar(context.Background(), queryEmbedding.Vector, modelName, 2)
 				if err != nil {
 					slog.Error("Search failed", "error", err)
 				} else {

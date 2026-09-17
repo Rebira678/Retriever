@@ -14,8 +14,11 @@ type Storage interface {
 	// and persists them to the vector database.
 	SaveEmbeddings(ctx context.Context, embeddings []models.Embedding) error
 
-	// SearchSimilar performs a vector similarity search to find the topK closest chunks.
-	SearchSimilar(ctx context.Context, queryEmbedding []float32, topK int) ([]models.SearchResult, error)
+	// SearchSimilar performs a vector similarity search to find the topK closest chunks, filtered by model to prevent vector space collisions.
+	SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int) ([]models.SearchResult, error)
+
+	// DeleteOldChunks performs garbage collection by deleting old vectors for a document that don't match the current model.
+	DeleteOldChunks(ctx context.Context, documentID string, currentModel string) error
 
 	// StartIngestion attempts to acquire an idempotency lock for a document hash.
 	// Returns true if the lock was acquired (document is new/failed previously), or false if it's already processing/completed.

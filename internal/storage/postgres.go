@@ -133,19 +133,21 @@ func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []model
 	return nil
 }
 
-// SearchSimilar uses the pgvector cosine distance operator (<=>) to find the most relevant chunks.
-func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []float32, topK int) ([]models.SearchResult, error) {
+// SearchSimilar uses the pgvector cosine distance operator (<=>) to find the most relevant chunks, strictly filtered by model.
+func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int) ([]models.SearchResult, error) {
 	// The <=> operator computes cosine distance. Lower distance means higher similarity.
 	// We sort by distance ASC to get the most similar vectors.
+	// We MUST filter by model to prevent comparing across different vector spaces (e.g. OpenAI vs Gemini).
 	query := `
 		SELECT document_id, chunk_index, content, (embedding <=> $1) AS distance
 		FROM chunks
+		WHERE model = $2
 		ORDER BY embedding <=> $1 ASC
-		LIMIT $2
+		LIMIT $3
 	`
 
 	vec := pgvector.NewVector(queryEmbedding)
-	rows, err := s.pool.Query(ctx, query, vec, topK)
+	rows, err := s.pool.Query(ctx, query, vec, modelName, topK)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute similarity search query: %w", err)
 	}
@@ -253,6 +255,19 @@ func (s *PostgresStorage) SaveDeadLetters(ctx context.Context, dlqs []models.Dea
 func (s *PostgresStorage) Close() error {
 	if s.pool != nil {
 		s.pool.Close()
+	}
+	return nil
+}
+
+// DeleteOldChunks performs garbage collection by deleting old chunks for a document that belong to a previous model.
+func (s *PostgresStorage) DeleteOldChunks(ctx context.Context, documentID string, currentModel string) error {
+	query := `
+		DELETE FROM chunks
+		WHERE document_id = $1 AND model != $2
+	`
+	_, err := s.pool.Exec(ctx, query, documentID, currentModel)
+	if err != nil {
+		return fmt.Errorf("failed to delete old chunks for document %s: %w", documentID, err)
 	}
 	return nil
 }
