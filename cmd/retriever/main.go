@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"os"
@@ -73,17 +72,6 @@ research tools to medical diagnosis assistants.`
 	// Create the chunker based on configuration
 	c := chunker.New(cfg.ChunkSize, cfg.ChunkOverlap)
 
-	chunks := c.Chunk(sampleDoc)
-	slog.Info("Document chunked successfully",
-		"input_length", len(sampleDoc),
-		"num_chunks", len(chunks),
-		"strategy", "fixed_size_overlap",
-	)
-
-	for i, chunk := range chunks {
-		fmt.Printf("\n─── Chunk %d (len=%d) ───\n%s\n", i+1, len(chunk.Text), chunk.Text)
-	}
-
 	// ─── Demo: Concurrent Embedding with Worker Pool ───────────────────────────────
 	var emb embedder.Embedder
 	dimension := cfg.EmbeddingDimension
@@ -104,9 +92,7 @@ research tools to medical diagnosis assistants.`
 	}
 
 	if emb != nil {
-		pool := pipeline.NewEmbedPool(emb, pipeline.WithWorkers(cfg.WorkerPoolSize))
-
-		// Initialize Database Connection earlier to support Idempotency & DLQ during embedding
+		// Initialize Database Connection
 		slog.Info("Connecting to PostgreSQL...", "url", cfg.DatabaseURL, "dimension", dimension)
 		var store storage.Storage
 		store, err := storage.NewPostgresStorage(context.Background(), cfg.DatabaseURL, dimension)
@@ -116,99 +102,18 @@ research tools to medical diagnosis assistants.`
 		}
 		defer store.Close()
 
-		docHashRaw := fmt.Sprintf("%s:%s:%s", provider, modelName, sampleDoc)
-		docHash := fmt.Sprintf("%x", sha256.Sum256([]byte(docHashRaw)))
-		docID := "sample-doc-rag"
-		
-		// Check for Idempotency using StartIngestion (atomic lock)
-		acquired, err := store.StartIngestion(context.Background(), docHash, docID)
-		if err != nil {
-			slog.Error("Failed to check idempotency", "error", err)
-			return
+		// ─── Senior Level: Orchestrator Pattern ───────────────────────────
+		// Encapsulate the entire complex ingestion logic (Idempotency, 
+		// Garbage Collection, Channels, DLQ) into a single reusable Pipeline struct.
+		p := pipeline.NewPipeline(cfg, store, emb, c)
+
+		doc := models.Document{
+			ID:      "sample-doc-rag",
+			Content: sampleDoc,
 		}
 
-		if !acquired {
-			slog.Info("Document already ingested or in progress (Idempotency hit), skipping processing", "hash", docHash, "document_id", docID)
-		} else {
-			// Lock acquired! Before starting, delete any chunks for this document from older models
-			// to prevent vector space mixing / database bloat. (Garbage Collection)
-			slog.Info("Lock acquired. Running garbage collection for old models...", "document_id", docID, "active_model", modelName)
-			if err := store.DeleteOldChunks(context.Background(), docID, modelName); err != nil {
-				slog.Error("Failed to garbage collect old chunks", "error", err)
-				// We can continue, but it's a warning.
-			}
-
-			// Set up channels with backpressure (bounded queues)
-			chunkChan := make(chan models.Chunk, cfg.IngestionQueueSize)
-			resultsChan := make(chan pipeline.EmbedResult, cfg.IngestionQueueSize)
-
-			// Feed chunks into the pipeline in a separate goroutine (Producer)
-			// This allows backpressure to kick in: if workers are slow (e.g. rate limited),
-			// this goroutine will block when the chunkChan is full.
-			go func() {
-				slog.Info("Starting ingestion producer goroutine...")
-				for _, chunk := range chunks {
-					chunk.DocumentID = docID // Link chunk to document ID for DLQ
-					chunkChan <- chunk
-				}
-				slog.Info("Finished enqueuing chunks. Closing chunk channel.")
-				close(chunkChan)
-			}()
-
-			slog.Info("Starting concurrent embedding worker pool...", "workers", cfg.WorkerPoolSize)
-			
-			// Run the pool in a separate goroutine so we can consume resultsChan concurrently
-			// avoiding deadlock when resultsChan gets full.
-			go func() {
-				pool.Run(context.Background(), chunkChan, resultsChan)
-			}()
-
-			var generatedEmbeddings []models.Embedding
-			var deadLetters []models.DeadLetter
-
-			for res := range resultsChan {
-				if res.Err != nil {
-					slog.Error("Failed to embed chunk", "chunk_index", res.Chunk.Index, "error", res.Err)
-					deadLetters = append(deadLetters, models.DeadLetter{
-						DocumentID: docID,
-						ChunkIndex: res.Chunk.Index,
-						Error:      res.Err.Error(),
-						Payload:    res.Chunk.Text,
-					})
-					continue
-				}
-				
-				generatedEmbeddings = append(generatedEmbeddings, res.Embedding)
-				if len(generatedEmbeddings) == 1 {
-					fmt.Printf("\n─── First Chunk Embedding (Sample) ───\n[%f, %f, %f, ...]\n",
-						res.Embedding.Vector[0], res.Embedding.Vector[1], res.Embedding.Vector[2])
-				}
-			}
-			slog.Info("Concurrent embedding completed", "total", len(generatedEmbeddings))
-
-			// Process Dead-Letters efficiently in batch
-			if len(deadLetters) > 0 {
-				if err := store.SaveDeadLetters(context.Background(), deadLetters); err != nil {
-					slog.Error("Failed to save to Dead Letter Queue", "error", err)
-				} else {
-					slog.Info("Saved failed chunks to Dead Letter Queue", "count", len(deadLetters))
-				}
-			}
-
-			if len(generatedEmbeddings) > 0 {
-				if err := store.SaveEmbeddings(context.Background(), generatedEmbeddings); err != nil {
-					slog.Error("Failed to save embeddings to database", "error", err)
-					_ = store.CompleteIngestion(context.Background(), docHash, models.StatusFailed)
-				} else {
-					slog.Info("Successfully saved embeddings to pgvector!", "count", len(generatedEmbeddings))
-					if err := store.CompleteIngestion(context.Background(), docHash, models.StatusCompleted); err != nil {
-						slog.Error("Failed to mark document as completed", "error", err)
-					}
-				}
-			} else {
-				// If nothing was generated (all failed), mark as FAILED
-				_ = store.CompleteIngestion(context.Background(), docHash, models.StatusFailed)
-			}
+		if err := p.RunIngestion(context.Background(), doc, provider, modelName); err != nil {
+			slog.Error("Pipeline ingestion failed", "error", err)
 		}
 
 		// ─── Demo: Similarity Search ─────────────────────────────────────────────
