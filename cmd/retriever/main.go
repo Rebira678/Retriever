@@ -122,19 +122,30 @@ research tools to medical diagnosis assistants.`
 		if !acquired {
 			slog.Info("Document already ingested or in progress (Idempotency hit), skipping processing", "hash", docHash, "document_id", docID)
 		} else {
-			// Set up channels with backpressure
-			chunkChan := make(chan models.Chunk, len(chunks))
-			resultsChan := make(chan pipeline.EmbedResult, len(chunks))
+			// Set up channels with backpressure (bounded queues)
+			chunkChan := make(chan models.Chunk, cfg.IngestionQueueSize)
+			resultsChan := make(chan pipeline.EmbedResult, cfg.IngestionQueueSize)
 
-			// Feed chunks into the pipeline
-			for _, chunk := range chunks {
-				chunk.DocumentID = docID // Link chunk to document ID for DLQ
-				chunkChan <- chunk
-			}
-			close(chunkChan)
+			// Feed chunks into the pipeline in a separate goroutine (Producer)
+			// This allows backpressure to kick in: if workers are slow (e.g. rate limited),
+			// this goroutine will block when the chunkChan is full.
+			go func() {
+				slog.Info("Starting ingestion producer goroutine...")
+				for _, chunk := range chunks {
+					chunk.DocumentID = docID // Link chunk to document ID for DLQ
+					chunkChan <- chunk
+				}
+				slog.Info("Finished enqueuing chunks. Closing chunk channel.")
+				close(chunkChan)
+			}()
 
 			slog.Info("Starting concurrent embedding worker pool...", "workers", cfg.WorkerPoolSize)
-			pool.Run(context.Background(), chunkChan, resultsChan)
+			
+			// Run the pool in a separate goroutine so we can consume resultsChan concurrently
+			// avoiding deadlock when resultsChan gets full.
+			go func() {
+				pool.Run(context.Background(), chunkChan, resultsChan)
+			}()
 
 			var generatedEmbeddings []models.Embedding
 			var deadLetters []models.DeadLetter
