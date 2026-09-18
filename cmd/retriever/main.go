@@ -21,6 +21,7 @@ import (
 	"github.com/Rebira678/Retriever/internal/embedder"
 	"github.com/Rebira678/Retriever/internal/models"
 	"github.com/Rebira678/Retriever/internal/pipeline"
+	"github.com/Rebira678/Retriever/internal/ratelimit"
 	"github.com/Rebira678/Retriever/internal/server"
 	"github.com/Rebira678/Retriever/internal/storage"
 	searchv1 "github.com/Rebira678/Retriever/pkg/api/search/v1"
@@ -93,6 +94,13 @@ research tools to medical diagnosis assistants.`
 	}
 
 	if emb != nil {
+		slog.Info("Wrapping embedder with outbound rate limiter", 
+			"capacity", cfg.RateLimitBurstCapacity, 
+			"refill_rate", cfg.RateLimitTokensPerSecond,
+		)
+		bucket := ratelimit.NewTokenBucket(cfg.RateLimitBurstCapacity, cfg.RateLimitTokensPerSecond)
+		emb = ratelimit.NewRateLimitedEmbedder(emb, bucket)
+
 		// Initialize Database Connection
 		slog.Info("Connecting to PostgreSQL...", "url", cfg.DatabaseURL, "dimension", dimension)
 		var store storage.Storage

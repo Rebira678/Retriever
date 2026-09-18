@@ -46,6 +46,12 @@ type Config struct {
 	// IngestionQueueSize is the size of the bounded channels for backpressure.
 	IngestionQueueSize int
 
+	// RateLimitTokensPerSecond is the refill rate of the API rate limiter.
+	RateLimitTokensPerSecond float64
+
+	// RateLimitBurstCapacity is the maximum burst allowed for the API rate limiter.
+	RateLimitBurstCapacity float64
+
 	// ─── Database ────────────────────────────────────────────────────────
 	// DatabaseURL is the Postgres connection string with pgvector extension.
 	DatabaseURL string
@@ -69,9 +75,11 @@ func Default() *Config {
 		OpenAIAPIKey:       "",
 		GeminiAPIKey:       "",
 		EmbeddingAPIURL:    "https://api.openai.com/v1/embeddings",
-		WorkerPoolSize:     4,
-		IngestionQueueSize: 100,
-		DatabaseURL:        "postgres://retriever:retriever@localhost:5433/retriever?sslmode=disable",
+		WorkerPoolSize:           4,
+		IngestionQueueSize:       100,
+		RateLimitTokensPerSecond: 10.0,
+		RateLimitBurstCapacity:   20.0,
+		DatabaseURL:              "postgres://retriever:retriever@localhost:5433/retriever?sslmode=disable",
 		GRPCPort:           ":50051",
 		HTTPPort:           ":8080",
 	}
@@ -119,6 +127,16 @@ func FromEnv() *Config {
 	if v := os.Getenv("RETRIEVER_INGESTION_QUEUE_SIZE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.IngestionQueueSize = n
+		}
+	}
+	if v := os.Getenv("RETRIEVER_RATE_LIMIT_TOKENS_PER_SEC"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.RateLimitTokensPerSecond = f
+		}
+	}
+	if v := os.Getenv("RETRIEVER_RATE_LIMIT_BURST_CAPACITY"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.RateLimitBurstCapacity = f
 		}
 	}
 	if v := os.Getenv("RETRIEVER_DATABASE_URL"); v != "" {
