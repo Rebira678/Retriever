@@ -71,7 +71,7 @@ func NewGeminiEmbedder(apiKey, model string, opts ...GeminiOption) *GeminiEmbedd
 // geminiEmbedRequest is the payload sent to the API.
 type geminiEmbedRequest struct {
 	Content struct {
-		Parts []struct {
+		Parts [1]struct {
 			Text string `json:"text"`
 		} `json:"parts"`
 	} `json:"content"`
@@ -94,7 +94,7 @@ func (e *GeminiEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (mo
 	defer e.bufPool.Put(buf)
 
 	reqBody := geminiEmbedRequest{}
-	reqBody.Content.Parts = []struct {
+	reqBody.Content.Parts = [1]struct {
 		Text string `json:"text"`
 	}{{Text: chunk.Text}}
 

@@ -153,7 +153,7 @@ func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []fl
 	}
 	defer rows.Close()
 
-	var results []models.SearchResult
+	results := make([]models.SearchResult, 0, topK)
 	for rows.Next() {
 		var res models.SearchResult
 		var distance float64

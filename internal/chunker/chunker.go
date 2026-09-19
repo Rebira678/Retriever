@@ -83,11 +83,13 @@ func (c *Chunker) Chunk(text string) []models.Chunk {
 		return nil
 	}
 
-	var chunks []models.Chunk
 	step := c.chunkSize - c.overlap
 	if step <= 0 {
 		step = 1 // Safety: prevent infinite loop
 	}
+
+	estimatedChunks := (len(text) / step) + 1
+	chunks := make([]models.Chunk, 0, estimatedChunks)
 
 	now := time.Now()
 	index := 0

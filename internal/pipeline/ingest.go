@@ -71,8 +71,8 @@ func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provid
 	}()
 
 	// 7. Aggregate Results
-	var generatedEmbeddings []models.Embedding
-	var deadLetters []models.DeadLetter
+	generatedEmbeddings := make([]models.Embedding, 0, len(chunks))
+	deadLetters := make([]models.DeadLetter, 0, len(chunks))
 
 	for res := range resultsChan {
 		if res.Err != nil {
