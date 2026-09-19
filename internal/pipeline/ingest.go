@@ -66,9 +66,13 @@ func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provid
 		p.pool.Run(ctx, chunkChan, resultsChan)
 	}()
 
-	// 7. Aggregate Results
-	generatedEmbeddings := make([]models.Embedding, 0, estimatedChunks)
-	deadLetters := make([]models.DeadLetter, 0, estimatedChunks)
+	// 7. Aggregate and Batch Persist (Streaming Architecture)
+	const batchSize = 100
+	var batch []models.Embedding
+	var deadLetters []models.DeadLetter
+	batch = make([]models.Embedding, 0, batchSize)
+
+	totalSaved := 0
 
 	for res := range resultsChan {
 		if res.Err != nil {
@@ -81,9 +85,32 @@ func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provid
 			})
 			continue
 		}
-		generatedEmbeddings = append(generatedEmbeddings, res.Embedding)
+		
+		batch = append(batch, res.Embedding)
+		
+		// Flush batch when it reaches capacity
+		if len(batch) >= batchSize {
+			if err := p.store.SaveEmbeddings(ctx, batch); err != nil {
+				slog.Error("Failed to save batch of embeddings to database", "error", err)
+				_ = p.store.CompleteIngestion(ctx, docHash, models.StatusFailed)
+				return err
+			}
+			totalSaved += len(batch)
+			batch = make([]models.Embedding, 0, batchSize) // Reset batch
+		}
 	}
-	slog.Info("Concurrent embedding completed", "total", len(generatedEmbeddings))
+
+	// Persist remaining items in the final partial batch
+	if len(batch) > 0 {
+		if err := p.store.SaveEmbeddings(ctx, batch); err != nil {
+			slog.Error("Failed to save final batch of embeddings to database", "error", err)
+			_ = p.store.CompleteIngestion(ctx, docHash, models.StatusFailed)
+			return err
+		}
+		totalSaved += len(batch)
+	}
+
+	slog.Info("Concurrent embedding and batch persistence completed", "total_saved", totalSaved)
 
 	// 8. Handle DLQ
 	if len(deadLetters) > 0 {
@@ -94,17 +121,8 @@ func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provid
 		}
 	}
 
-	// 9. Persist Vectors and Mark Status
-	if len(generatedEmbeddings) > 0 {
-		if err := p.store.SaveEmbeddings(ctx, generatedEmbeddings); err != nil {
-			slog.Error("Failed to save embeddings to database", "error", err)
-			_ = p.store.CompleteIngestion(ctx, docHash, models.StatusFailed)
-			return err
-		}
-		
-		slog.Info("Successfully saved embeddings to pgvector!", "count", len(generatedEmbeddings))
-
-		// 9b. Mark Completed
+	// 9. Mark Status
+	if totalSaved > 0 {
 		if err := p.store.CompleteIngestion(ctx, docHash, models.StatusCompleted); err != nil {
 			slog.Error("Failed to mark document as completed", "error", err)
 			return err
