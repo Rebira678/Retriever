@@ -34,7 +34,12 @@ func NewPipeline(cfg *config.Config, store storage.Storage, emb embedder.Embedde
 }
 
 // RunIngestion executes the full RAG ingestion pipeline for a single document.
-func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provider string, modelName string) error {
+func (p *Pipeline) RunIngestion(parentCtx context.Context, doc models.Document, provider string, modelName string) error {
+	// 0. Prevent Goroutine Leaks
+	// Create a derived context so that if the pipeline errors out early, 
+	// all spawned worker goroutines are explicitly cancelled and cleaned up.
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
 	// 1. Calculate Estimated Chunk Count (Zero Allocation)
 	estimatedChunks := p.chunker.EstimatedChunkCount(len(doc.Content))
 	slog.Info("Prepared document for streaming", "document_id", doc.ID, "estimated_chunks", estimatedChunks)
@@ -96,7 +101,8 @@ func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provid
 				return err
 			}
 			totalSaved += len(batch)
-			batch = make([]models.Embedding, 0, batchSize) // Reset batch
+			// Reuse the same backing array for zero-allocation batching
+			batch = batch[:0] 
 		}
 	}
 
