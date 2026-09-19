@@ -106,7 +106,7 @@ func (e *OpenAIEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (mo
 		Model: e.model,
 	}
 
-	if err := json.NewEncoder(buf).Encode(reqBody); err != nil {
+	if err := json.NewEncoder(buf).Encode(&reqBody); err != nil {
 		return models.Embedding{}, fmt.Errorf("failed to encode request: %w", err)
 	}
 

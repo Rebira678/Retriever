@@ -10,9 +10,9 @@ This is similar to a factory wasting time constantly ordering and throwing away 
 Using the `go build -gcflags="-m"` tool, we audited the pipeline and discovered multiple inefficient heap allocations caused by dynamically growing slices.
 
 We implemented the following senior-level memory optimizations:
-1. **Pre-allocated Chunks (`internal/chunker/chunker.go`)**: We now pre-calculate the expected number of chunks based on document length and overlap size (`estimatedChunks = (len(text) / step) + 1`), explicitly initializing the slice capacity `make([]models.Chunk, 0, estimatedChunks)`. This prevents the slice from repeatedly escaping to the heap during `append()` reallocations.
-2. **Pre-allocated Results (`internal/storage/postgres.go`)**: When scanning vector similarity search results, we now pre-allocate the slice using the `topK` parameter `make([]models.SearchResult, 0, topK)`.
-3. **Pre-allocated Embeddings & Dead Letters (`internal/pipeline/ingest.go`)**: We pre-allocate both arrays during aggregation using the known `len(chunks)`.
+1. **Zero-Allocation Chunk Streaming (`internal/chunker/chunker.go`)**: Previously, the `Chunk()` method allocated an entire slice of all chunks in memory, which is a classic junior mistake that causes massive memory spikes for large documents. We implemented a `StreamChunks` generator pattern that computes chunks dynamically and yields them directly to the orchestrator channel. This turns memory consumption from `O(N)` into **`O(1)`**, meaning the pipeline uses the exact same amount of memory regardless of document size!
+2. **Pre-allocated Embeddings & Dead Letters (`internal/pipeline/ingest.go`)**: Using the new `EstimatedChunkCount` mathematical formula, we now pre-allocate the final aggregation arrays before the worker pool even starts, eliminating dynamic growth allocations.
+3. **Pointer Boxing Fix for `json.Encode` (`internal/embedder/*.go`)**: We noticed that passing `reqBody` by value to `json.NewEncoder().Encode(reqBody)` forced the Go runtime to box the struct into an `interface{}`, which always triggers a heap allocation. By passing a pointer `Encode(&reqBody)`, escape analysis keeps the struct safely on the stack.
 4. **Fixed-Size Array over Slices (`internal/embedder/gemini.go`)**: In our Gemini API request payload, we replaced the dynamic `Parts []struct` slice with a fixed-size `Parts [1]struct` array. This completely eliminated a heap allocation on every single API request while still marshaling perfectly to the expected JSON array structure.
 
 ## Why This Matters

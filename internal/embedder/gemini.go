@@ -98,7 +98,7 @@ func (e *GeminiEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (mo
 		Text string `json:"text"`
 	}{{Text: chunk.Text}}
 
-	if err := json.NewEncoder(buf).Encode(reqBody); err != nil {
+	if err := json.NewEncoder(buf).Encode(&reqBody); err != nil {
 		return models.Embedding{}, fmt.Errorf("failed to encode gemini request: %w", err)
 	}
 

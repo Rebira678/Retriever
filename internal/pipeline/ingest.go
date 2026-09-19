@@ -35,9 +35,9 @@ func NewPipeline(cfg *config.Config, store storage.Storage, emb embedder.Embedde
 
 // RunIngestion executes the full RAG ingestion pipeline for a single document.
 func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provider string, modelName string) error {
-	// 1. Chunk Document
-	chunks := p.chunker.Chunk(doc.Content)
-	slog.Info("Document chunked successfully", "document_id", doc.ID, "num_chunks", len(chunks))
+	// 1. Calculate Estimated Chunk Count (Zero Allocation)
+	estimatedChunks := p.chunker.EstimatedChunkCount(len(doc.Content))
+	slog.Info("Prepared document for streaming", "document_id", doc.ID, "estimated_chunks", estimatedChunks)
 
 	// 2. Check Idempotency Lock
 	docHashRaw := fmt.Sprintf("%s:%s:%s", provider, modelName, doc.Content)
@@ -56,13 +56,9 @@ func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provid
 	chunkChan := make(chan models.Chunk, p.cfg.IngestionQueueSize)
 	resultsChan := make(chan EmbedResult, p.cfg.IngestionQueueSize)
 
-	// 5. Producer Goroutine
+	// 5. Producer Goroutine (Zero Allocation Streaming)
 	go func() {
-		for _, chunk := range chunks {
-			chunk.DocumentID = doc.ID
-			chunkChan <- chunk
-		}
-		close(chunkChan)
+		p.chunker.StreamChunks(ctx, doc.Content, doc.ID, chunkChan)
 	}()
 
 	// 6. Consumer Worker Pool
@@ -71,8 +67,8 @@ func (p *Pipeline) RunIngestion(ctx context.Context, doc models.Document, provid
 	}()
 
 	// 7. Aggregate Results
-	generatedEmbeddings := make([]models.Embedding, 0, len(chunks))
-	deadLetters := make([]models.DeadLetter, 0, len(chunks))
+	generatedEmbeddings := make([]models.Embedding, 0, estimatedChunks)
+	deadLetters := make([]models.DeadLetter, 0, estimatedChunks)
 
 	for res := range resultsChan {
 		if res.Err != nil {

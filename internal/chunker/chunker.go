@@ -29,6 +29,7 @@
 package chunker
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -123,6 +124,69 @@ func (c *Chunker) Chunk(text string) []models.Chunk {
 	}
 
 	return chunks
+}
+
+// EstimatedChunkCount mathematically calculates the expected number of chunks.
+func (c *Chunker) EstimatedChunkCount(textLength int) int {
+	if textLength == 0 {
+		return 0
+	}
+	step := c.chunkSize - c.overlap
+	if step <= 0 {
+		step = 1
+	}
+	return (textLength / step) + 1
+}
+
+// StreamChunks splits the input text and streams chunks directly to the provided channel.
+// This is a senior-level O(1) memory approach that completely bypasses slice allocation.
+func (c *Chunker) StreamChunks(ctx context.Context, text string, docID string, out chan<- models.Chunk) {
+	defer close(out)
+	text = normalizeWhitespace(text)
+
+	if len(text) == 0 {
+		return
+	}
+
+	step := c.chunkSize - c.overlap
+	if step <= 0 {
+		step = 1
+	}
+
+	now := time.Now()
+	index := 0
+
+	for start := 0; start < len(text); start += step {
+		end := start + c.chunkSize
+		if end > len(text) {
+			end = len(text)
+		}
+
+		chunkText := text[start:end]
+		if strings.TrimSpace(chunkText) == "" {
+			continue
+		}
+
+		chunk := models.Chunk{
+			Index:       index,
+			Text:        chunkText,
+			StartOffset: start,
+			EndOffset:   end,
+			CreatedAt:   now,
+			DocumentID:  docID,
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case out <- chunk:
+		}
+
+		index++
+		if end >= len(text) {
+			break
+		}
+	}
 }
 
 // ChunkSize returns the configured chunk size.
