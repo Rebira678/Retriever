@@ -50,9 +50,10 @@ func initializeSchema(ctx context.Context, pool *pgxpool.Pool, dimension int) er
 			chunk_index INT NOT NULL,
 			model TEXT NOT NULL,
 			content TEXT NOT NULL,
+			content_hash TEXT NOT NULL,
 			embedding vector(%d) NOT NULL,
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE (document_id, chunk_index, model)
+			UNIQUE (document_id, content_hash, model)
 		);
 	`, dimension)
 
@@ -110,10 +111,11 @@ func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []model
 	batch := &pgx.Batch{}
 	
 	insertSQL := `
-		INSERT INTO chunks (document_id, chunk_index, model, content, embedding, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (document_id, chunk_index, model) DO UPDATE 
-		SET content = EXCLUDED.content, 
+		INSERT INTO chunks (document_id, chunk_index, model, content, content_hash, embedding, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (document_id, content_hash, model) DO UPDATE 
+		SET chunk_index = EXCLUDED.chunk_index,
+		    content = EXCLUDED.content, 
 		    embedding = EXCLUDED.embedding,
 		    created_at = EXCLUDED.created_at
 	`
@@ -121,7 +123,7 @@ func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []model
 	// Queue all inserts into a single network round-trip batch
 	for _, emb := range embeddings {
 		vec := pgvector.NewVector(emb.Vector)
-		batch.Queue(insertSQL, emb.DocumentID, emb.ChunkIndex, emb.Model, emb.Text, vec, emb.CreatedAt)
+		batch.Queue(insertSQL, emb.DocumentID, emb.ChunkIndex, emb.Model, emb.Text, emb.ContentHash, vec, emb.CreatedAt)
 	}
 	
 	// Send the batch

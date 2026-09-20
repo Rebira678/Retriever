@@ -30,6 +30,8 @@ package chunker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"time"
 
@@ -108,9 +110,13 @@ func (c *Chunker) Chunk(text string) []models.Chunk {
 			continue
 		}
 
+		hashBytes := sha256.Sum256([]byte(chunkText))
+		contentHash := hex.EncodeToString(hashBytes[:])
+
 		chunks = append(chunks, models.Chunk{
 			Index:       index,
 			Text:        chunkText,
+			ContentHash: contentHash,
 			StartOffset: start,
 			EndOffset:   end,
 			CreatedAt:   now,
@@ -167,9 +173,13 @@ func (c *Chunker) StreamChunks(ctx context.Context, text string, docID string, o
 			continue
 		}
 
+		hashBytes := sha256.Sum256([]byte(chunkText))
+		contentHash := hex.EncodeToString(hashBytes[:])
+
 		chunk := models.Chunk{
 			Index:       index,
 			Text:        chunkText,
+			ContentHash: contentHash,
 			StartOffset: start,
 			EndOffset:   end,
 			CreatedAt:   now,

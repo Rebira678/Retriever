@@ -48,6 +48,9 @@ type Chunk struct {
 	// DocumentID links this chunk back to its source document.
 	DocumentID string `json:"document_id,omitempty"`
 
+	// ContentHash is the SHA-256 hash of the chunk text.
+	ContentHash string `json:"content_hash"`
+
 	// CreatedAt is the timestamp when the chunk was created.
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -62,6 +65,9 @@ type Embedding struct {
 
 	// Text is the actual content of the chunk, saved alongside the vector.
 	Text string `json:"text"`
+
+	// ContentHash is the SHA-256 hash of the chunk text.
+	ContentHash string `json:"content_hash"`
 
 	// DocumentID links back to the source document.
 	DocumentID string `json:"document_id"`

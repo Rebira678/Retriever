@@ -74,6 +74,7 @@ func (p *EmbedPool) Run(ctx context.Context, chunksIn <-chan models.Chunk, resul
 						emb.ChunkIndex = chunk.Index
 						emb.DocumentID = chunk.DocumentID
 						emb.Text = chunk.Text // Carry text forward for storage
+						emb.ContentHash = chunk.ContentHash // Carry hash forward for idempotent inserts
 					}
 					if err == nil && emb.CreatedAt.IsZero() {
 						emb.CreatedAt = time.Now()
