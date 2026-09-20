@@ -172,3 +172,86 @@ func TestRunIngestion_DatabaseFailureLeaksGoroutines(t *testing.T) {
 		t.Fatalf("Expected ingestion to be marked as FAILED")
 	}
 }
+
+func TestRunBatchIngestion_Success(t *testing.T) {
+	cfg := config.Default()
+	store := &MockStorage{}
+	emb := &MockEmbedder{}
+	c := chunker.New(10, 0)
+	p := pipeline.NewPipeline(cfg, store, emb, c)
+
+	docs := []models.Document{
+		{ID: "doc-1", Content: "First document content"},
+		{ID: "doc-2", Content: "Second document content"},
+	}
+
+	err := p.RunBatchIngestion(context.Background(), docs, "mock", "mock")
+	if err != nil {
+		t.Fatalf("Expected success, got: %v", err)
+	}
+
+	if len(store.EmbeddingsSaved) == 0 {
+		t.Fatalf("Expected embeddings to be saved for batch")
+	}
+}
+
+func TestRunBatchIngestion_PartialIdempotency(t *testing.T) {
+	cfg := config.Default()
+	store := &MockStorage{
+		startIngestionFunc: func(ctx context.Context, hash, docID string) (bool, error) {
+			if docID == "doc-locked" {
+				return false, nil // Simulate already processed
+			}
+			return true, nil
+		},
+	}
+	emb := &MockEmbedder{}
+	c := chunker.New(50, 0)
+	p := pipeline.NewPipeline(cfg, store, emb, c)
+
+	docs := []models.Document{
+		{ID: "doc-locked", Content: "This should be skipped"},
+		{ID: "doc-new", Content: "This should be processed"},
+	}
+
+	err := p.RunBatchIngestion(context.Background(), docs, "mock", "mock")
+	if err != nil {
+		t.Fatalf("Expected success despite idempotency hit, got: %v", err)
+	}
+
+	// Because doc-locked was skipped, we should only have embeddings for doc-new
+	for _, emb := range store.EmbeddingsSaved {
+		if emb.DocumentID == "doc-locked" {
+			t.Fatalf("Expected doc-locked to be skipped, but found its embeddings")
+		}
+	}
+}
+
+func TestRunBatchIngestion_DatabaseError(t *testing.T) {
+	cfg := config.Default()
+	store := &MockStorage{
+		saveEmbeddingsFunc: func(ctx context.Context, embeddings []models.Embedding) error {
+			return errors.New("simulated batch db error")
+		},
+	}
+	emb := &MockEmbedder{}
+	c := chunker.New(5, 0)
+	p := pipeline.NewPipeline(cfg, store, emb, c)
+
+	docs := []models.Document{
+		{ID: "doc-1", Content: "Lots of tiny chunks for batch"},
+		{ID: "doc-2", Content: "Even more chunks here"},
+	}
+
+	start := time.Now()
+	err := p.RunBatchIngestion(context.Background(), docs, "mock", "mock")
+	duration := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("Expected DB error to bubble up")
+	}
+
+	if duration > 100*time.Millisecond {
+		t.Fatalf("Pipeline took too long to cancel (%v), errgroup context cancellation failed", duration)
+	}
+}
