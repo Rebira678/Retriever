@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/Rebira678/Retriever/internal/chunker"
 	"github.com/Rebira678/Retriever/internal/config"
@@ -139,4 +142,126 @@ func (p *Pipeline) RunIngestion(parentCtx context.Context, doc models.Document, 
 	}
 
 	return nil
+}
+
+// RunBatchIngestion executes the RAG ingestion pipeline for multiple documents concurrently.
+//
+// Architecture Tradeoff (Batch vs Streaming):
+//   - RunIngestion (Streaming) is optimized for single, massive documents (O(1) memory).
+//   - RunBatchIngestion (Batch) is optimized for throughput. It uses bounded fan-out 
+//     and structured concurrency to fully saturate the worker pool safely.
+func (p *Pipeline) RunBatchIngestion(parentCtx context.Context, docs []models.Document, provider string, modelName string) error {
+	// Expert Level: Structured Concurrency via errgroup
+	// This guarantees that if any stage fails, the entire pipeline immediately tears down,
+	// preventing zombie goroutines and memory leaks.
+	g, ctx := errgroup.WithContext(parentCtx)
+
+	slog.Info("Starting batch ingestion", "document_count", len(docs))
+
+	chunkChan := make(chan models.Chunk, p.cfg.IngestionQueueSize)
+	resultsChan := make(chan EmbedResult, p.cfg.IngestionQueueSize)
+
+	// Stage 1: Fan-Out Document Producer
+	g.Go(func() error {
+		defer close(chunkChan) // Safely close when all producers finish
+		
+		var chunkWg sync.WaitGroup
+		// Bounded concurrency semaphore (prevents DB connection exhaustion on massive batches)
+		sem := make(chan struct{}, 10)
+
+		for _, doc := range docs {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case sem <- struct{}{}:
+			}
+
+			chunkWg.Add(1)
+			go func(d models.Document) {
+				defer chunkWg.Done()
+				defer func() { <-sem }()
+
+				docHashRaw := fmt.Sprintf("%s:%s:%s", provider, modelName, d.Content)
+				docHash := fmt.Sprintf("%x", sha256.Sum256([]byte(docHashRaw)))
+
+				// Distributed lock check (concurrently safe)
+				acquired, err := p.store.StartIngestion(ctx, docHash, d.ID)
+				if err != nil || !acquired {
+					return
+				}
+
+				// For batch processing of smaller docs, in-memory slice chunking is 
+				// more CPU-efficient than channel orchestration per-document.
+				chunks := p.chunker.Chunk(d.Content)
+				for _, chunk := range chunks {
+					chunk.DocumentID = d.ID // Link chunk to document
+					
+					select {
+					case <-ctx.Done():
+						return
+					case chunkChan <- chunk:
+					}
+				}
+			}(doc)
+		}
+
+		chunkWg.Wait() // Wait for all documents to be chunked
+		return nil
+	})
+
+	// Stage 2: Concurrent Worker Pool
+	g.Go(func() error {
+		p.pool.Run(ctx, chunkChan, resultsChan)
+		return nil
+	})
+
+	// Stage 3: Batch Persistence Consumer
+	g.Go(func() error {
+		const batchSize = 100
+		batch := make([]models.Embedding, 0, batchSize)
+		var deadLetters []models.DeadLetter
+		totalSaved := 0
+
+		for res := range resultsChan {
+			if res.Err != nil {
+				deadLetters = append(deadLetters, models.DeadLetter{
+					DocumentID: res.Chunk.DocumentID,
+					ChunkIndex: res.Chunk.Index,
+					Error:      res.Err.Error(),
+					Payload:    res.Chunk.Text,
+				})
+				continue
+			}
+			
+			batch = append(batch, res.Embedding)
+			
+			if len(batch) >= batchSize {
+				if err := p.store.SaveEmbeddings(ctx, batch); err != nil {
+					return fmt.Errorf("bulk save failed: %w", err)
+				}
+				totalSaved += len(batch)
+				batch = batch[:0] 
+			}
+		}
+
+		// Flush remaining embeddings
+		if len(batch) > 0 {
+			if err := p.store.SaveEmbeddings(ctx, batch); err != nil {
+				return fmt.Errorf("final bulk save failed: %w", err)
+			}
+			totalSaved += len(batch)
+		}
+
+		if len(deadLetters) > 0 {
+			// Best effort DLQ save, we don't fail the entire pipeline for this
+			_ = p.store.SaveDeadLetters(ctx, deadLetters)
+			slog.Warn("Batch ingestion completed with failures", "failed_chunks", len(deadLetters))
+		}
+
+		slog.Info("Batch ingestion completed", "total_saved", totalSaved)
+		return nil
+	})
+
+	// Wait blocks until all g.Go functions return
+	return g.Wait()
 }
