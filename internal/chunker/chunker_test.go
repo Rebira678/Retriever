@@ -272,6 +272,33 @@ func TestChunk_CreatedAtIsSet(t *testing.T) {
 	}
 }
 
+func TestChunk_ContentHash(t *testing.T) {
+	c := New(50, 0)
+	// These two texts will result in identical chunks after whitespace normalization
+	text1 := "The quick brown fox jumps over the lazy dog."
+	text2 := "The    quick   brown   fox jumps over the lazy dog."
+	
+	chunks1 := c.Chunk(text1)
+	chunks2 := c.Chunk(text2)
+	
+	if len(chunks1) == 0 || len(chunks2) == 0 {
+		t.Fatal("expected chunks, got none")
+	}
+	
+	// Hashes should match for identical content
+	if chunks1[0].ContentHash != chunks2[0].ContentHash {
+		t.Errorf("expected identical hashes for identical text, got %s and %s", chunks1[0].ContentHash, chunks2[0].ContentHash)
+	}
+	
+	// Different content should have different hashes
+	text3 := "A completely different document text."
+	chunks3 := c.Chunk(text3)
+	
+	if chunks1[0].ContentHash == chunks3[0].ContentHash {
+		t.Errorf("expected different hashes for different text, got same hash %s", chunks1[0].ContentHash)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Benchmarks — important for Day 31+ when we need throughput numbers
 // ─────────────────────────────────────────────────────────────────────────────
