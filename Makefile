@@ -21,6 +21,9 @@ test-verbose: ## Run all tests with verbose output
 bench: ## Run benchmarks
 	go test ./internal/chunker/... -bench=. -benchmem -count=3
 
+bench-latency: ## Run pgvector latency benchmarks
+	go run ./cmd/benchmark_latency/main.go
+
 lint: ## Run go vet
 	go vet ./...
 
