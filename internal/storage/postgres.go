@@ -62,6 +62,11 @@ func initializeSchema(ctx context.Context, pool *pgxpool.Pool, dimension int) er
 		return err
 	}
 
+	// For robust backward compatibility during local development, ensure new columns are added
+	// if the table was created before Day 36 idempotency updates.
+	_, _ = pool.Exec(ctx, "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT '';")
+	_, _ = pool.Exec(ctx, "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS chunk_index INT DEFAULT 0;")
+
 	// Create idempotency tracking table
 	createIdempotencySQL := `
 		CREATE TABLE IF NOT EXISTS ingested_documents (
@@ -90,14 +95,10 @@ func initializeSchema(ctx context.Context, pool *pgxpool.Pool, dimension int) er
 		return err
 	}
 
-	// pgvector hnsw indexes support up to 2000 dimensions by default.
-	// If the dimension is greater than 2000, we skip creating the index and rely on exact nearest neighbor search (sequential scan), which is fine for small/medium datasets.
-	if dimension <= 2000 {
-		// We create an index for cosine distance ('vector_cosine_ops') to optimize search speed
-		indexSQL := `CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);`
-		_, err = pool.Exec(ctx, indexSQL)
-		return err
-	}
+	// We intentionally do NOT create the vector index synchronously during schema initialization.
+	// For production datasets, index creation is extremely heavy, generates massive WAL activity,
+	// and should be handled asynchronously via OptimizeIndex() to avoid blocking deployments.
+	// Furthermore, we may want to tune maintenance_work_mem before building.
 	
 	return nil
 }
@@ -140,11 +141,19 @@ func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []model
 	return nil
 }
 
-// SearchSimilar uses the pgvector cosine distance operator (<=>) to find the most relevant chunks, strictly filtered by model.
-func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int) ([]models.SearchResult, error) {
-	// The <=> operator computes cosine distance. Lower distance means higher similarity.
-	// We sort by distance ASC to get the most similar vectors.
-	// We MUST filter by model to prevent comparing across different vector spaces (e.g. OpenAI vs Gemini).
+// SearchSimilar uses pgvector's (<=>) operator (cosine distance) to find the most relevant chunks.
+func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) {
+	// Dynamically configure ef_search for this specific transaction.
+	// ef_search controls the size of the dynamic candidate list during HNSW traversal.
+	// Default is 40. Higher = better recall but higher latency.
+	if efSearch > 0 {
+		_, err := s.pool.Exec(ctx, fmt.Sprintf("SET LOCAL hnsw.ef_search = %d", efSearch))
+		if err != nil {
+			return nil, fmt.Errorf("failed to set ef_search: %w", err)
+		}
+	}
+
+	// We MUST filter by model to isolate vector spaces (e.g. OpenAI vs Gemini vs Local).
 	query := `
 		SELECT document_id, chunk_index, content, (embedding <=> $1) AS distance
 		FROM chunks
@@ -292,3 +301,48 @@ func (s *PostgresStorage) SweepOldChunks(ctx context.Context, safeWindow time.Du
 	}
 	return nil
 }
+
+// OptimizeIndex forces an expert-level HNSW index creation.
+// In production, this should run asynchronously. We temporarily bump maintenance_work_mem
+// to accelerate graph construction and minimize WAL bloat.
+func (s *PostgresStorage) OptimizeIndex(ctx context.Context, dimension int, m int, efConstruction int) error {
+	if dimension > 2000 {
+		return fmt.Errorf("pgvector HNSW index supports max 2000 dimensions, got %d", dimension)
+	}
+
+	// Acquire a dedicated connection to manipulate session variables safely
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection for indexing: %w", err)
+	}
+	defer conn.Release()
+
+	// 1. Temporarily boost maintenance memory for this session (accelerates HNSW graph construction)
+	// Requires postgres role privileges.
+	_, err = conn.Exec(ctx, "SET maintenance_work_mem = '1GB';")
+	if err != nil {
+		// We log but do not fail if privileges are insufficient
+		fmt.Println("⚠️ [Optimization] Could not set maintenance_work_mem to 1GB. Ensure DB user has sufficient privileges for max performance.")
+	}
+
+	// 2. Build the HNSW Index
+	// m: limits maximum outbound connections per node in the graph (16-64 is typical).
+	// ef_construction: controls the breadth of search during index build (higher = better quality, slower build).
+	fmt.Printf("🚀 [Optimization] Building HNSW index (m=%d, ef_construction=%d). This may take a while depending on row count...\n", m, efConstruction)
+	
+	indexSQL := fmt.Sprintf(`
+		CREATE INDEX IF NOT EXISTS chunks_embedding_idx 
+		ON chunks 
+		USING hnsw (embedding vector_cosine_ops) 
+		WITH (m = %d, ef_construction = %d);
+	`, m, efConstruction)
+
+	_, err = conn.Exec(ctx, indexSQL)
+	if err != nil {
+		return fmt.Errorf("failed to create HNSW index: %w", err)
+	}
+
+	fmt.Println("✅ [Optimization] HNSW Index successfully built.")
+	return nil
+}
+
