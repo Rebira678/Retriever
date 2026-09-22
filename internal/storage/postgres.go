@@ -18,9 +18,21 @@ type PostgresStorage struct {
 
 // NewPostgresStorage initializes a connection pool and ensures the database schema exists.
 func NewPostgresStorage(ctx context.Context, dbURL string, dimension int) (*PostgresStorage, error) {
-	pool, err := pgxpool.New(ctx, dbURL)
+	cfg, err := pgxpool.ParseConfig(dbURL)
 	if err != nil {
-		return nil, fmt.Errorf("unable to connect to database: %w", err)
+		return nil, fmt.Errorf("unable to parse database URL: %w", err)
+	}
+
+	// EXPERT ARCHITECTURE: Tune the connection pool for high-throughput (100+ RPS) load testing
+	// Defaults are often too low, causing connection exhaustion and latency spikes.
+	cfg.MaxConns = 100
+	cfg.MinConns = 10
+	cfg.MaxConnLifetime = 1 * time.Hour
+	cfg.MaxConnIdleTime = 30 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create connection pool: %w", err)
 	}
 
 	// Verify connection

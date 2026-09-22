@@ -27,6 +27,7 @@ import (
 	searchv1 "github.com/Rebira678/Retriever/pkg/api/search/v1"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"net"
 
 	_ "github.com/joho/godotenv/autoload"
@@ -149,7 +150,7 @@ research tools to medical diagnosis assistants.`
 				slog.Error("Failed to embed query", "error", err)
 			} else {
 				slog.Info("Searching for most similar chunks...")
-				results, err := store.SearchSimilar(context.Background(), queryEmbedding.Vector, modelName, 2)
+				results, err := store.SearchSimilar(context.Background(), queryEmbedding.Vector, modelName, 2, 0)
 				if err != nil {
 					slog.Error("Search failed", "error", err)
 				} else {
@@ -171,8 +172,19 @@ research tools to medical diagnosis assistants.`
 						server.LoggingInterceptor(slog.Default()),
 						server.RecoveryInterceptor(slog.Default()),
 					),
+					// EXPERT ARCHITECTURE: Protect the server from HTTP/2 stream exhaustion 
+					// and dead connections during intense load testing.
+					grpc.MaxConcurrentStreams(1000),
+					grpc.KeepaliveParams(keepalive.ServerParameters{
+						MaxConnectionIdle: 5 * time.Minute,
+						Time:              2 * time.Hour,
+						Timeout:           20 * time.Second,
+					}),
 				)
-				searchSrv := server.NewSearchServer(store, emb, server.WithLogger(slog.Default()))
+				// Wrap the embedder with an in-memory Bounded LRU cache and Singleflight
+				// to prevent external API rate-limiting and cache stampedes during gRPC load tests (Day 45).
+				cachedEmb := embedder.NewCachedEmbedder(emb, 10000, 1*time.Hour)
+				searchSrv := server.NewSearchServer(store, cachedEmb, server.WithLogger(slog.Default()))
 				searchv1.RegisterSearchServiceServer(grpcServer, searchSrv)
 
 				// Use errgroup for decoupled lifecycle management

@@ -88,7 +88,7 @@ func (s *SearchServer) Search(ctx context.Context, req *searchv1.SearchRequest) 
 	}
 
 	// 4. Vector Similarity Search (Database Call)
-	results, err := s.store.SearchSimilar(ctx, emb.Vector, emb.Model, topK)
+	results, err := s.store.SearchSimilar(ctx, emb.Vector, emb.Model, topK, 0)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			s.logger.Warn("database search timed out or canceled", "error", err)

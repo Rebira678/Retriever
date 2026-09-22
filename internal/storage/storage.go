@@ -16,7 +16,7 @@ type Storage interface {
 	SaveEmbeddings(ctx context.Context, embeddings []models.Embedding) error
 
 	// SearchSimilar performs a vector similarity search to find the topK closest chunks, filtered by model to prevent vector space collisions.
-	SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int) ([]models.SearchResult, error)
+	SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error)
 
 	// SweepOldChunks performs delayed garbage collection, deleting old vectors only after a new model has proven stable (safe window elapsed).
 	SweepOldChunks(ctx context.Context, safeWindow time.Duration) error
