@@ -24,6 +24,9 @@ bench: ## Run benchmarks
 bench-latency: ## Run pgvector latency benchmarks
 	go run ./cmd/benchmark_latency/main.go
 
+load-test: ## Run k6 load test against search gRPC endpoint
+	k6 run k6-search-loadtest.js
+
 lint: ## Run go vet
 	go vet ./...
 
