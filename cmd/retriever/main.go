@@ -171,6 +171,9 @@ research tools to medical diagnosis assistants.`
 					grpc.ChainUnaryInterceptor(
 						server.LoggingInterceptor(slog.Default()),
 						server.RecoveryInterceptor(slog.Default()),
+						server.AdaptiveLoadSheddingInterceptor(
+							server.NewAdaptiveLimiter(100, 10, 1000, 200*time.Millisecond),
+						),
 					),
 					// EXPERT ARCHITECTURE: Protect the server from HTTP/2 stream exhaustion 
 					// and dead connections during intense load testing.
