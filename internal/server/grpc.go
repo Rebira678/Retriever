@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/Rebira678/Retriever/internal/circuitbreaker"
 	"github.com/Rebira678/Retriever/internal/embedder"
 	"github.com/Rebira678/Retriever/internal/models"
 	"github.com/Rebira678/Retriever/internal/storage"
@@ -21,6 +25,7 @@ type SearchServer struct {
 	store    storage.Storage
 	embedder embedder.Embedder
 	logger   *slog.Logger
+	dbCb     circuitbreaker.CircuitBreaker
 }
 
 // SearchServerOption defines functional options for configuring the SearchServer.
@@ -39,6 +44,10 @@ func NewSearchServer(store storage.Storage, emb embedder.Embedder, opts ...Searc
 		store:    store,
 		embedder: emb,
 		logger:   slog.Default(),
+		dbCb: circuitbreaker.New(
+			circuitbreaker.WithFailureThreshold(5),
+			circuitbreaker.WithTimeout(10*time.Second),
+		),
 	}
 
 	for _, opt := range opts {
@@ -87,9 +96,19 @@ func (s *SearchServer) Search(ctx context.Context, req *searchv1.SearchRequest) 
 		return nil, status.Errorf(codes.Internal, "failed to process query embedding")
 	}
 
-	// 4. Vector Similarity Search (Database Call)
-	results, err := s.store.SearchSimilar(ctx, emb.Vector, emb.Model, topK, 0)
+	// 4. Vector Similarity Search (Database Call) with Circuit Breaker
+	var results []models.SearchResult
+	err = s.dbCb.Execute(ctx, func(innerCtx context.Context) error {
+		var dbErr error
+		results, dbErr = s.store.SearchSimilar(innerCtx, emb.Vector, emb.Model, topK, 0)
+		return dbErr
+	})
+
 	if err != nil {
+		if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
+			s.logger.Warn("database circuit breaker is open, shedding load")
+			return nil, status.Error(codes.Unavailable, "service temporarily overloaded")
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			s.logger.Warn("database search timed out or canceled", "error", err)
 			return nil, status.Error(codes.DeadlineExceeded, "database search timed out")
@@ -169,5 +188,103 @@ func RecoveryInterceptor(logger *slog.Logger) grpc.UnaryServerInterceptor {
 			}
 		}()
 		return handler(ctx, req)
+	}
+}
+
+// AdaptiveLimiter implements an AIMD (Additive Increase, Multiplicative Decrease) 
+// concurrency limiter to maximize throughput while preventing latency degradation.
+type AdaptiveLimiter struct {
+	mu        sync.Mutex
+	limit     float64
+	inFlight  atomic.Int64
+	
+	minLimit  float64
+	maxLimit  float64
+	
+	targetLat time.Duration
+	rtt       time.Duration // Exponential Moving Average of RTT
+	alpha     float64       // EMA smoothing factor
+}
+
+// NewAdaptiveLimiter constructs a concurrency limiter that dynamically adjusts its capacity based on latency.
+func NewAdaptiveLimiter(initialLimit, min, max int, targetLatency time.Duration) *AdaptiveLimiter {
+	return &AdaptiveLimiter{
+		limit:     float64(initialLimit),
+		minLimit:  float64(min),
+		maxLimit:  float64(max),
+		targetLat: targetLatency,
+		rtt:       targetLatency,
+		alpha:     0.1, // EMA weight
+	}
+}
+
+// Acquire attempts to claim a concurrency slot.
+func (l *AdaptiveLimiter) Acquire() bool {
+	curr := l.inFlight.Load()
+	
+	l.mu.Lock()
+	limit := int64(math.Floor(l.limit))
+	l.mu.Unlock()
+	
+	if curr >= limit {
+		return false
+	}
+	
+	l.inFlight.Add(1)
+	return true
+}
+
+// Release frees the slot and triggers the AIMD algorithm based on the observed latency and success state.
+func (l *AdaptiveLimiter) Release(d time.Duration, success bool) {
+	l.inFlight.Add(-1)
+	
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	
+	// Update EMA of RTT
+	l.rtt = time.Duration(float64(l.rtt)*(1-l.alpha) + float64(d)*l.alpha)
+	
+	if !success || l.rtt > l.targetLat {
+		// Multiplicative Decrease (Backoff when latency degrades or infra fails)
+		l.limit *= 0.9 
+		if l.limit < l.minLimit {
+			l.limit = l.minLimit
+		}
+	} else {
+		// Additive Increase (Probe for more capacity when healthy)
+		l.limit += 0.1 
+		if l.limit > l.maxLimit {
+			l.limit = l.maxLimit
+		}
+	}
+}
+
+// AdaptiveLoadSheddingInterceptor returns a UnaryServerInterceptor that rejects requests
+// dynamically based on real-time server latency using the AIMD algorithm.
+func AdaptiveLoadSheddingInterceptor(limiter *AdaptiveLimiter) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		if !limiter.Acquire() {
+			return nil, status.Errorf(codes.ResourceExhausted, "service temporarily overloaded (adaptive shed)")
+		}
+		
+		start := time.Now()
+		resp, err := handler(ctx, req)
+		
+		// Determine if this failure was due to infrastructure/overload (e.g., Timeout)
+		success := err == nil
+		if err != nil {
+			code := status.Code(err)
+			// Business logic errors (InvalidArgument) don't trigger backoff, 
+			// only infrastructure pressure (DeadlineExceeded, Unavailable, Internal)
+			if code == codes.DeadlineExceeded || code == codes.Unavailable || code == codes.Internal {
+				success = false
+			} else {
+				success = true 
+			}
+		}
+		
+		limiter.Release(time.Since(start), success)
+		
+		return resp, err
 	}
 }
