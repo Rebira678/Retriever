@@ -3,12 +3,14 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/Rebira678/Retriever/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
+	"golang.org/x/sync/errgroup"
 )
 
 // PostgresStorage implements the Storage interface using PostgreSQL and pgvector.
@@ -78,6 +80,16 @@ func initializeSchema(ctx context.Context, pool *pgxpool.Pool, dimension int) er
 	// if the table was created before Day 36 idempotency updates.
 	_, _ = pool.Exec(ctx, "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT '';")
 	_, _ = pool.Exec(ctx, "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS chunk_index INT DEFAULT 0;")
+
+	// EXPERT ARCHITECTURE (Day 47): Add an expression index for Full-Text Search (Keyword search)
+	// We use a STORED GENERATED column to compute the tsvector once at insert time, saving CPU cycles during search.
+	// We also create a GIN index on this column for blazing fast keyword matching.
+	_, _ = pool.Exec(ctx, "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED;")
+	
+	_, err = pool.Exec(ctx, "CREATE INDEX IF NOT EXISTS chunks_content_tsv_idx ON chunks USING GIN (content_tsv);")
+	if err != nil {
+		return err
+	}
 
 	// Create idempotency tracking table
 	createIdempotencySQL := `
@@ -199,6 +211,137 @@ func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []fl
 	}
 
 	return results, nil
+}
+
+// SearchHybrid implements expert-level Reciprocal Rank Fusion (RRF) using a Scatter-Gather pattern.
+func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) {
+	if efSearch > 0 {
+		_, err := s.pool.Exec(ctx, fmt.Sprintf("SET LOCAL hnsw.ef_search = %d", efSearch))
+		if err != nil {
+			return nil, fmt.Errorf("failed to set ef_search: %w", err)
+		}
+	}
+
+	const candidates = 60
+	const rrfK = 60.0
+	const alphaVector = 0.5   // Weighting for vector search
+	const alphaKeyword = 0.5  // Weighting for keyword search
+
+	// EXPERT ARCHITECTURE: Scatter-Gather Pattern.
+	// Instead of forcing PostgreSQL to execute complex CTEs and UNION ALLs on a single DB connection,
+	// we dispatch two concurrent queries via the connection pool. This guarantees parallel execution
+	// and shifts the CPU burden of ranking/fusing from the Database to the horizontally scalable Go application.
+	g, gCtx := errgroup.WithContext(ctx)
+
+	var vectorResults []models.SearchResult
+	var keywordResults []models.SearchResult
+
+	// 1. Scatter: Concurrent Vector Search
+	g.Go(func() error {
+		query := `
+			SELECT document_id, chunk_index, content
+			FROM chunks
+			WHERE model = $1
+			ORDER BY embedding <=> $2
+			LIMIT $3
+		`
+		vec := pgvector.NewVector(queryEmbedding)
+		rows, err := s.pool.Query(gCtx, query, modelName, vec, candidates)
+		if err != nil {
+			return fmt.Errorf("vector search failed: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var r models.SearchResult
+			if err := rows.Scan(&r.DocumentID, &r.ChunkIndex, &r.ChunkText); err != nil {
+				return err
+			}
+			vectorResults = append(vectorResults, r)
+		}
+		return rows.Err()
+	})
+
+	// 2. Scatter: Concurrent Keyword Search
+	g.Go(func() error {
+		query := `
+			SELECT document_id, chunk_index, content
+			FROM chunks
+			WHERE model = $1 AND content_tsv @@ websearch_to_tsquery('english', $2)
+			ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $2)) DESC
+			LIMIT $3
+		`
+		rows, err := s.pool.Query(gCtx, query, modelName, queryText, candidates)
+		if err != nil {
+			return fmt.Errorf("keyword search failed: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var r models.SearchResult
+			if err := rows.Scan(&r.DocumentID, &r.ChunkIndex, &r.ChunkText); err != nil {
+				return err
+			}
+			keywordResults = append(keywordResults, r)
+		}
+		return rows.Err()
+	})
+
+	// Wait for both searches to complete
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	// 3. Gather: In-Memory Reciprocal Rank Fusion
+	type chunkKey struct {
+		DocID string
+		Index int
+	}
+	fusionMap := make(map[chunkKey]*models.SearchResult, candidates*2)
+
+	// Fuse Vector Results
+	for i, res := range vectorResults {
+		rank := float64(i + 1)
+		key := chunkKey{DocID: res.DocumentID, Index: res.ChunkIndex}
+		fusionMap[key] = &models.SearchResult{
+			DocumentID: res.DocumentID,
+			ChunkIndex: res.ChunkIndex,
+			ChunkText:  res.ChunkText,
+			Score:      alphaVector * (1.0 / (rrfK + rank)),
+		}
+	}
+
+	// Fuse Keyword Results
+	for i, res := range keywordResults {
+		rank := float64(i + 1)
+		key := chunkKey{DocID: res.DocumentID, Index: res.ChunkIndex}
+		if existing, exists := fusionMap[key]; exists {
+			existing.Score += alphaKeyword * (1.0 / (rrfK + rank))
+		} else {
+			fusionMap[key] = &models.SearchResult{
+				DocumentID: res.DocumentID,
+				ChunkIndex: res.ChunkIndex,
+				ChunkText:  res.ChunkText,
+				Score:      alphaKeyword * (1.0 / (rrfK + rank)),
+			}
+		}
+	}
+
+	// 4. Sort by RRF Score and Truncate
+	finalResults := make([]models.SearchResult, 0, len(fusionMap))
+	for _, res := range fusionMap {
+		finalResults = append(finalResults, *res)
+	}
+
+	sort.Slice(finalResults, func(i, j int) bool {
+		return finalResults[i].Score > finalResults[j].Score // Descending order
+	})
+
+	if len(finalResults) > topK {
+		finalResults = finalResults[:topK]
+	}
+
+	return finalResults, nil
 }
 
 // StartIngestion attempts to lock the document hash for processing.
