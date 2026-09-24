@@ -33,3 +33,4 @@ docs/
 
 # Generated
 benchmark_latency
+escape_analysis.log
