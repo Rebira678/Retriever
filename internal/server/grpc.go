@@ -100,7 +100,9 @@ func (s *SearchServer) Search(ctx context.Context, req *searchv1.SearchRequest) 
 	var results []models.SearchResult
 	err = s.dbCb.Execute(ctx, func(innerCtx context.Context) error {
 		var dbErr error
-		results, dbErr = s.store.SearchSimilar(innerCtx, emb.Vector, emb.Model, topK, 0)
+		// EXPERT ARCHITECTURE (Day 47): We use Hybrid Search (RRF) instead of pure Vector Search.
+		// This combines the semantic understanding of vectors with the exact matching of Full-Text Search.
+		results, dbErr = s.store.SearchHybrid(innerCtx, req.Query, emb.Vector, emb.Model, topK, 0)
 		return dbErr
 	})
 
