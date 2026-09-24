@@ -51,7 +51,8 @@ func (m *MockStorage) SaveDeadLetters(ctx context.Context, dlqs []models.DeadLet
 	}
 	return nil
 }
-func (m *MockStorage) SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int) ([]models.SearchResult, error) { return nil, nil }
+func (m *MockStorage) SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) { return nil, nil }
+func (m *MockStorage) SearchHybrid(ctx context.Context, queryText string, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) { return nil, nil }
 func (m *MockStorage) SweepOldChunks(ctx context.Context, safeWindow time.Duration) error { return nil }
 func (m *MockStorage) Close() error { return nil }
 
