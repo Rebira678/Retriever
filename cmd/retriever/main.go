@@ -149,8 +149,8 @@ research tools to medical diagnosis assistants.`
 			if err != nil {
 				slog.Error("Failed to embed query", "error", err)
 			} else {
-				slog.Info("Searching for most similar chunks...")
-				results, err := store.SearchSimilar(context.Background(), queryEmbedding.Vector, modelName, 2, 0)
+				slog.Info("Searching for most similar chunks (Hybrid RRF)...")
+				results, err := store.SearchHybrid(context.Background(), query, queryEmbedding.Vector, modelName, 2, 0)
 				if err != nil {
 					slog.Error("Search failed", "error", err)
 				} else {
