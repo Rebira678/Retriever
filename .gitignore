@@ -30,3 +30,6 @@ Thumbs.db
 roadmap_text.txt
 docs/
 /retriever
+
+# Generated
+benchmark_latency
