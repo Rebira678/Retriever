@@ -18,6 +18,9 @@ type Storage interface {
 	// SearchSimilar performs a vector similarity search to find the topK closest chunks, filtered by model to prevent vector space collisions.
 	SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error)
 
+	// SearchHybrid performs an expert-level Reciprocal Rank Fusion (RRF) combining vector similarity and full-text search.
+	SearchHybrid(ctx context.Context, queryText string, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error)
+
 	// SweepOldChunks performs delayed garbage collection, deleting old vectors only after a new model has proven stable (safe window elapsed).
 	SweepOldChunks(ctx context.Context, safeWindow time.Duration) error
 
