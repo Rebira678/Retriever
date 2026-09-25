@@ -36,5 +36,8 @@ type Storage interface {
 	
 	// Close gracefully shuts down the database connection.
 	Close() error
+
+	// Ping checks if the database is responsive. Used for Kubernetes Readiness Probes.
+	Ping(ctx context.Context) error
 }
 

@@ -167,6 +167,10 @@ func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []model
 
 // SearchSimilar uses pgvector's (<=>) operator (cosine distance) to find the most relevant chunks.
 func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) {
+	if topK < 0 {
+		return nil, fmt.Errorf("failed to execute similarity search: topK cannot be negative")
+	}
+
 	// Dynamically configure ef_search for this specific transaction.
 	// ef_search controls the size of the dynamic candidate list during HNSW traversal.
 	// Default is 40. Higher = better recall but higher latency.
@@ -215,6 +219,10 @@ func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []fl
 
 // SearchHybrid implements expert-level Reciprocal Rank Fusion (RRF) using a Scatter-Gather pattern.
 func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) {
+	if topK < 0 {
+		return nil, fmt.Errorf("failed to execute hybrid search: topK cannot be negative")
+	}
+
 	if efSearch > 0 {
 		_, err := s.pool.Exec(ctx, fmt.Sprintf("SET LOCAL hnsw.ef_search = %d", efSearch))
 		if err != nil {
@@ -428,6 +436,11 @@ func (s *PostgresStorage) Close() error {
 		s.pool.Close()
 	}
 	return nil
+}
+
+// Ping verifies the database connection is alive. Used for dynamic Kubernetes probes.
+func (s *PostgresStorage) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
 }
 
 // SweepOldChunks deletes orphaned vectors that belong to an older model,
