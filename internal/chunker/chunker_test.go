@@ -322,3 +322,35 @@ func BenchmarkChunk_LargeDoc(b *testing.B) {
 		c.Chunk(text)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Senior Level: Fuzz Testing
+// Fuzzing aggressively tests the chunker against random, corrupted, and 
+// adversarial inputs (e.g. malformed Unicode, massive contiguous strings).
+// ─────────────────────────────────────────────────────────────────────────────
+func FuzzChunk(f *testing.F) {
+	// Seed the fuzzer with expected inputs
+	f.Add("Normal text that should be chunked correctly.")
+	f.Add("    Lots of   whitespace   should be normalized.    ")
+	f.Add("A")
+	f.Add("")
+	f.Add("Hello, 世界") // Unicode characters
+
+	f.Fuzz(func(t *testing.T, orig string) {
+		c := New(512, 64)
+		chunks := c.Chunk(orig)
+
+		// 1. Must not panic
+		// 2. Chunks must not exceed chunk size
+		for _, ch := range chunks {
+			if len(ch.Text) > c.ChunkSize() {
+				t.Errorf("Chunk exceeded max size: len=%d", len(ch.Text))
+			}
+			
+			// 3. Must be valid UTF-8, no partial runes
+			if strings.ContainsRune(ch.Text, '\uFFFD') && !strings.ContainsRune(orig, '\uFFFD') {
+				t.Errorf("Chunking corrupted UTF-8 string boundaries")
+			}
+		}
+	})
+}
