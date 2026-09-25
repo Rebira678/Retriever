@@ -145,9 +145,9 @@ cd /home/rebik/Documents/Linkedln_chaallange/project_1/retriever
 # 1. Start the PostgreSQL vector database
 docker compose up -d
 
-# 2. Make sure you have your API key exported so the Embedder works
-export RETRIEVER_GEMINI_API_KEY="your_actual_key_here"
-# OR export RETRIEVER_OPENAI_API_KEY="..."
+# 2. Ensure your API keys are configured via a secret manager or local .env file
+# Create a .env file (it is ignored by git) and add:
+# RETRIEVER_GEMINI_API_KEY=your_actual_key_here
 
 # 3. Start the Retriever gRPC Server
 go run cmd/retriever/main.go
