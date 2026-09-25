@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: retriever-network-policy
+  labels:
+    app: retriever
+spec:
+  podSelector:
+    matchLabels:
+      app: retriever
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow inbound traffic ONLY to the gRPC port
+    - ports:
+        - protocol: TCP
+          port: 50051
+  egress:
+    # Allow outbound traffic to Postgres and external APIs (OpenAI/Gemini)
+    - ports:
+        - protocol: TCP
+          port: 5432 # Postgres
+        - protocol: TCP
+          port: 443  # HTTPS for APIs
+    - ports:
+        - protocol: UDP
+          port: 53   # DNS resolution

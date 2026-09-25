@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 01-configmap.yaml
+  - 02-secret.yaml
+  - 03-postgres.yaml
+  - 04-deployment.yaml
+  - 05-service.yaml
+  - 06-hpa.yaml
+  - 07-pdb.yaml
+  - 08-networkpolicy.yaml
+
+# Expert Level: Automatically append a hash to ConfigMap/Secret names
+# so that any changes to them trigger an automatic rolling restart of the Deployment.
+configMapGenerator:
+  - name: retriever-config-dynamic
+    behavior: replace
+    literals:
+      - RETRIEVER_GRPC_PORT=":50051"
+      - RETRIEVER_CHUNK_SIZE="512"
+      - RETRIEVER_CHUNK_OVERLAP="64"
+      - RETRIEVER_WORKER_POOL_SIZE="4"
+      - RETRIEVER_DATABASE_URL="postgres://retriever:retriever@retriever-postgres:5432/retriever?sslmode=disable"
+
+# We replace the static ConfigMap reference in the deployment with the generated one
+replacements:
+  - source:
+      kind: ConfigMap
+      name: retriever-config-dynamic
+    targets:
+      - select:
+          kind: Deployment
+          name: retriever
+        fieldPaths:
+          - spec.template.spec.containers.[name=retriever].envFrom.[configMapRef.name=retriever-config].configMapRef.name

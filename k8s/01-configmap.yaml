@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: retriever-config
+  labels:
+    app: retriever
+data:
+  RETRIEVER_GRPC_PORT: ":50051"
+  RETRIEVER_CHUNK_SIZE: "512"
+  RETRIEVER_CHUNK_OVERLAP: "64"
+  RETRIEVER_CHUNK_STRATEGY: "fixed_size"
+  RETRIEVER_WORKER_POOL_SIZE: "4"
+  RETRIEVER_DATABASE_URL: "postgres://retriever:retriever@retriever-postgres:5432/retriever?sslmode=disable"
