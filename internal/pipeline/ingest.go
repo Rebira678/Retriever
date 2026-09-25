@@ -169,10 +169,13 @@ func (p *Pipeline) RunBatchIngestion(parentCtx context.Context, docs []models.Do
 		// Bounded concurrency semaphore (prevents DB connection exhaustion on massive batches)
 		sem := make(chan struct{}, 10)
 
+		var errResult error
+	ProducerLoop:
 		for _, doc := range docs {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				errResult = ctx.Err()
+				break ProducerLoop
 			case sem <- struct{}{}:
 			}
 
@@ -206,7 +209,7 @@ func (p *Pipeline) RunBatchIngestion(parentCtx context.Context, docs []models.Do
 		}
 
 		chunkWg.Wait() // Wait for all documents to be chunked
-		return nil
+		return errResult
 	})
 
 	// Stage 2: Concurrent Worker Pool
