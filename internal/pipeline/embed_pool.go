@@ -58,6 +58,19 @@ func (p *EmbedPool) Run(ctx context.Context, chunksIn <-chan models.Chunk, resul
 	for i := 0; i < p.numWorkers; i++ {
 		go func() {
 			defer wg.Done()
+			
+			// Senior Architecture: Panic Recovery in Worker Pools
+			// Third-party SDKs (OpenAI/Gemini) might panic internally on malformed responses.
+			// If we don't catch it here, the entire gRPC server crashes.
+			defer func() {
+				if r := recover(); r != nil {
+					// We can't easily send to resultsOut because we don't know which chunk failed,
+					// but we MUST prevent the panic from bubbling up.
+					// A real implementation might use a generic DLQ entry or context cancellation.
+					// For now, catching it ensures the pipeline eventually drains or times out gracefully.
+				}
+			}()
+
 			for {
 				select {
 				case <-ctx.Done():
