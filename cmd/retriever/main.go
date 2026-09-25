@@ -27,6 +27,8 @@ import (
 	searchv1 "github.com/Rebira678/Retriever/pkg/api/search/v1"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 	"net"
 
@@ -189,6 +191,36 @@ research tools to medical diagnosis assistants.`
 				cachedEmb := embedder.NewCachedEmbedder(emb, 10000, 1*time.Hour)
 				searchSrv := server.NewSearchServer(store, cachedEmb, server.WithLogger(slog.Default()))
 				searchv1.RegisterSearchServiceServer(grpcServer, searchSrv)
+
+				// EXPERT ARCHITECTURE: Register native gRPC Health Server for Kubernetes Probes
+				healthServer := health.NewServer()
+				grpc_health_v1.RegisterHealthServer(grpcServer, healthServer)
+				
+				// Dynamic Health Checking Goroutine
+				// Ties the Kubernetes Readiness Probe directly to the Postgres connection pool
+				go func() {
+					slog.Info("Starting dynamic health checker for Kubernetes probes")
+					ticker := time.NewTicker(5 * time.Second)
+					defer ticker.Stop()
+					
+					// Initial state
+					healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+					
+					for {
+						<-ticker.C
+						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						err := store.Ping(ctx)
+						cancel()
+						
+						if err != nil {
+							slog.Warn("Health check failed, marking NOT_SERVING", "error", err)
+							healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+						} else {
+							healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+						}
+					}
+				}()
+
 
 				// Use errgroup for decoupled lifecycle management
 				g, gCtx := errgroup.WithContext(context.Background())
