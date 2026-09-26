@@ -26,6 +26,7 @@ This document explains every concept in the Retriever RAG pipeline using real-wo
 18. [Index Tuning — Reorganizing the Filing Cabinet](#scenario-18-index-tuning-day-44)
 19. [Singleflight & Cache Stampedes — The Shared Cab](#scenario-19-singleflight-and-cache-stampedes-day-45)
 20. [Circuit Breakers & Load Shedding — The Factory Fuse Box](#scenario-20-circuit-breakers-and-load-shedding-day-46)
+21. [Kubernetes & Chaos Engineering — The Warehouse Network](#scenario-21-kubernetes-and-chaos-engineering-day-48)
 
 ---
 
@@ -649,6 +650,28 @@ A massive power surge hits the grid.
 
 **In Go code:**
 By combining these patterns in `internal/circuitbreaker/circuitbreaker.go` and as gRPC Interceptors, our Search API actively defends itself. It can absorb a 10,000 RPS attack, shed the excess load, and gracefully degrade to serve cache-hits even while the underlying database is completely offline.
+
+---
+
+## Scenario 21: Kubernetes & Chaos Engineering (Day 48)
+### The Warehouse Network 🏢🌐
+
+**Imagine this:**
+
+You've built the perfect car factory. It's fast, efficient, and has fuses to protect against power surges. But it exists in a vacuum. To scale globally, you need to manage hundreds of these factories across different cities. 
+
+**The Junior Approach (Manual Management):**
+> You hire a manager for every factory. If a factory catches fire, the manager has to manually call the construction company, wait weeks to rebuild it, and reroute the delivery trucks by hand. If the power grid goes down, the manager just locks the doors and hides.
+
+**The Expert Approach (Kubernetes & Chaos Engineering):**
+> You hire a global, automated "City Planner" (Kubernetes). 
+> 
+> 1. **Dynamic Health Probes (The Pulse Check):** The City Planner constantly calls every factory and asks, "Are you healthy? Is your power grid working?" If the factory's internal systems fail, the City Planner instantly stops sending delivery trucks to that factory and routes them elsewhere. 
+> 2. **Zero-Trust Security (The Vault):** Every factory is placed inside an indestructible vault. Even if someone breaks in, there are no tools to steal, and they can't change any of the machinery (Distroless containers, read-only filesystems, dropped capabilities). 
+> 3. **Chaos Engineering (The Fire Drill):** To prove the system works, you don't just read the blueprints—you purposefully light a small fire in a factory and cut its power (Fuzzing and Chaos Testing). You mathematically prove that the factory safely shuts down its machinery, cancels all active orders without dropping them, and the City Planner instantly replaces the factory within seconds.
+
+**In Go Code:**
+This is why we built native `grpc_health_v1` protocols that constantly ping the Postgres database connection pool in the background. It's why we tested the pipeline by forcing a 5% fatal SDK panic rate, proving that `errgroup` cancels all contexts safely without data races or memory leaks. We don't assume the infrastructure is perfect; we assume it's actively trying to kill us, and we architect the system to survive it.
 
 ---
 

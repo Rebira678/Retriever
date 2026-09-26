@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/cpu"
 )
 
 // State represents the state of the Circuit Breaker.
@@ -72,9 +74,21 @@ func WithOnStateChange(fn func(from, to State)) Option {
 
 // cb implements a high-performance, lock-free (fast-path) circuit breaker.
 type cb struct {
+	// [SENIOR ARCHITECTURE: Mechanical Sympathy & False Sharing]
+	// We use atomic variables for lock-free state transitions under extreme load.
+	// However, if 'state', 'failures', and 'successes' sit adjacently in memory,
+	// multiple CPU cores will constantly invalidate each other's L1/L2 caches 
+	// (Cache-Line Bouncing) via the MESI protocol every time one is updated.
+	// By injecting cpu.CacheLinePad (64 bytes), we mathematically force these 
+	// hot-path variables onto separate hardware cache lines, eliminating False Sharing.
 	state     atomic.Uint32
+	_         cpu.CacheLinePad
+
 	failures  atomic.Uint32
+	_         cpu.CacheLinePad
+
 	successes atomic.Uint32
+	_         cpu.CacheLinePad
 
 	// mu serializes state transitions to prevent thundering herd.
 	mu     sync.Mutex
