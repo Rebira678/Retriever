@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
@@ -148,9 +149,14 @@ func injectTraceComment(ctx context.Context, query string) string {
 // SaveEmbeddings persists a batch of embeddings using high-performance pgx.Batch.
 func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []models.Embedding) error {
 	tracer := otel.Tracer("retriever/storage/postgres")
-	spanCtx, span := tracer.Start(ctx, "PostgresStorage.SaveEmbeddings", trace.WithAttributes(
-		attribute.Int("batch.size", len(embeddings)),
-	))
+	spanCtx, span := tracer.Start(ctx, "DB INSERT chunks", 
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			semconv.DBSystemPostgreSQL,
+			semconv.DBStatementKey.String("INSERT INTO chunks"),
+			attribute.Int("batch.size", len(embeddings)),
+		),
+	)
 	defer span.End()
 
 	if len(embeddings) == 0 {
@@ -196,11 +202,16 @@ func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []model
 // SearchSimilar uses pgvector's (<=>) operator (cosine distance) to find the most relevant chunks.
 func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) {
 	tracer := otel.Tracer("retriever/storage/postgres")
-	spanCtx, span := tracer.Start(ctx, "PostgresStorage.SearchSimilar", trace.WithAttributes(
-		attribute.String("model", modelName),
-		attribute.Int("topK", topK),
-		attribute.Int("efSearch", efSearch),
-	))
+	spanCtx, span := tracer.Start(ctx, "DB SELECT chunks (Vector Search)", 
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			semconv.DBSystemPostgreSQL,
+			semconv.DBStatementKey.String("SELECT document_id, chunk_index, content (embedding <=>)"),
+			attribute.String("model", modelName),
+			attribute.Int("topK", topK),
+			attribute.Int("efSearch", efSearch),
+		),
+	)
 	defer span.End()
 
 	if topK < 0 {
@@ -267,12 +278,17 @@ func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []fl
 // SearchHybrid implements expert-level Reciprocal Rank Fusion (RRF) using a Scatter-Gather pattern.
 func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) {
 	tracer := otel.Tracer("retriever/storage/postgres")
-	spanCtx, span := tracer.Start(ctx, "PostgresStorage.SearchHybrid", trace.WithAttributes(
-		attribute.String("model", modelName),
-		attribute.Int("topK", topK),
-		attribute.Int("efSearch", efSearch),
-		attribute.Int("query.length", len(queryText)),
-	))
+	spanCtx, span := tracer.Start(ctx, "DB HybridSearch (RRF)", 
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			semconv.DBSystemPostgreSQL,
+			semconv.DBStatementKey.String("SELECT document_id, chunk_index, content (Hybrid RRF)"),
+			attribute.String("model", modelName),
+			attribute.Int("topK", topK),
+			attribute.Int("efSearch", efSearch),
+			attribute.Int("query.length", len(queryText)),
+		),
+	)
 	defer span.End()
 
 	if topK < 0 {
@@ -305,6 +321,12 @@ func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, qu
 
 	// 1. Scatter: Concurrent Vector Search
 	g.Go(func() error {
+		_, childSpan := tracer.Start(spanCtx, "DB SELECT chunks (Vector)", 
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(semconv.DBStatementKey.String("ORDER BY embedding <=>")),
+		)
+		defer childSpan.End()
+
 		query := injectTraceComment(spanCtx, `
 			SELECT document_id, chunk_index, content
 			FROM chunks
@@ -331,6 +353,12 @@ func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, qu
 
 	// 2. Scatter: Concurrent Keyword Search
 	g.Go(func() error {
+		_, childSpan := tracer.Start(spanCtx, "DB SELECT chunks (Keyword)", 
+			trace.WithSpanKind(trace.SpanKindClient),
+			trace.WithAttributes(semconv.DBStatementKey.String("content_tsv @@ websearch_to_tsquery")),
+		)
+		defer childSpan.End()
+
 		query := injectTraceComment(spanCtx, `
 			SELECT document_id, chunk_index, content
 			FROM chunks
