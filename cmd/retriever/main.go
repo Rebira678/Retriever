@@ -39,9 +39,10 @@ import (
 
 func main() {
 	// ─── Structured Logger ───────────────────────────────────────────────
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	jsonHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	}))
+	})
+	logger := slog.New(telemetry.NewOTelSlogHandler(jsonHandler))
 	slog.SetDefault(logger)
 
 	slog.Info("🚀 Retriever RAG Ingestion Pipeline starting",
