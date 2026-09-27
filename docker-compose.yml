@@ -15,5 +15,16 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: retriever-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # UI
+      - "4327:4327"   # OTLP gRPC
+      - "4328:4328"   # OTLP HTTP
+    restart: unless-stopped
+
 volumes:
   postgres_data:
