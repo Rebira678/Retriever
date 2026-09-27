@@ -1,0 +1,60 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4327
+      http:
+        endpoint: 0.0.0.0:4328
+
+processors:
+  # Protects against OOMs by limiting memory usage
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Batches traces and metrics to reduce network overhead
+  batch:
+    send_batch_size: 100
+    timeout: 1s
+
+  # Senior Pattern: Tail-Based Sampling
+  # Only export traces that either have an ERROR, or took longer than 500ms
+  # (Commented out by default for Day 51 local testing so you can see all traces, 
+  # but this is how you configure it for production).
+  # tail_sampling:
+  #   policies:
+  #     - name: errors-policy
+  #       type: status_code
+  #       status_code: {status_codes: [ERROR]}
+  #     - name: latency-policy
+  #       type: latency
+  #       latency: {threshold_ms: 500}
+
+exporters:
+  # Export to Tempo (Trace backend)
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  
+  # Export Metrics to Prometheus
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    send_timestamps: true
+    metric_expiration: 180m
+
+  # Export to console for debugging
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
