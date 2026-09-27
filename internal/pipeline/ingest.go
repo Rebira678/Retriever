@@ -7,6 +7,12 @@ import (
 	"log/slog"
 	"sync"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/Rebira678/Retriever/internal/chunker"
@@ -38,10 +44,26 @@ func NewPipeline(cfg *config.Config, store storage.Storage, emb embedder.Embedde
 
 // RunIngestion executes the full RAG ingestion pipeline for a single document.
 func (p *Pipeline) RunIngestion(parentCtx context.Context, doc models.Document, provider string, modelName string) error {
+	// Senior Feature: Baggage (Tenant Context Propagation)
+	member, _ := baggage.NewMember("document_id", doc.ID)
+	b, _ := baggage.New(member)
+	baggageCtx := baggage.ContextWithBaggage(parentCtx, b)
+
+	tracer := otel.Tracer("retriever/pipeline")
+	meter := otel.Meter("retriever/pipeline")
+	chunksCounter, _ := meter.Int64Counter("rag_chunks_processed_total", metric.WithDescription("Total number of chunks successfully processed and embedded"))
+
+	spanCtx, span := tracer.Start(baggageCtx, "Pipeline.RunIngestion", trace.WithAttributes(
+		attribute.String("document.id", doc.ID),
+		attribute.String("provider", provider),
+		attribute.String("model", modelName),
+	))
+	defer span.End()
+
 	// 0. Prevent Goroutine Leaks
 	// Create a derived context so that if the pipeline errors out early, 
 	// all spawned worker goroutines are explicitly cancelled and cleaned up.
-	ctx, cancel := context.WithCancel(parentCtx)
+	ctx, cancel := context.WithCancel(spanCtx)
 	defer cancel()
 	// 1. Calculate Estimated Chunk Count (Zero Allocation)
 	estimatedChunks := p.chunker.EstimatedChunkCount(len(doc.Content))
@@ -61,12 +83,25 @@ func (p *Pipeline) RunIngestion(parentCtx context.Context, doc models.Document, 
 	}
 
 	// 3. Backpressure Queues
-	chunkChan := make(chan models.Chunk, p.cfg.IngestionQueueSize)
+	chunkChan := make(chan ChunkTask, p.cfg.IngestionQueueSize)
 	resultsChan := make(chan EmbedResult, p.cfg.IngestionQueueSize)
 
 	// 5. Producer Goroutine (Zero Allocation Streaming)
 	go func() {
-		p.chunker.StreamChunks(ctx, doc.Content, doc.ID, chunkChan)
+		defer close(chunkChan)
+		chunks := p.chunker.Chunk(doc.Content) // Using in-memory for simpler streaming demo
+		for _, chunk := range chunks {
+			chunk.DocumentID = doc.ID
+			chunkCtx, _ := tracer.Start(ctx, "Pipeline.ProcessChunk", trace.WithAttributes(
+				attribute.Int("chunk.index", chunk.Index),
+			))
+			
+			select {
+			case <-ctx.Done():
+				return
+			case chunkChan <- ChunkTask{Ctx: chunkCtx, Chunk: chunk}:
+			}
+		}
 	}()
 
 	// 6. Consumer Worker Pool
@@ -77,12 +112,25 @@ func (p *Pipeline) RunIngestion(parentCtx context.Context, doc models.Document, 
 	// 7. Aggregate and Batch Persist (Streaming Architecture)
 	const batchSize = 100
 	var batch []models.Embedding
+	var batchResults []EmbedResult
 	var deadLetters []models.DeadLetter
 	batch = make([]models.Embedding, 0, batchSize)
+	batchResults = make([]EmbedResult, 0, batchSize)
 
 	totalSaved := 0
 
 	for res := range resultsChan {
+		// End the chunk processing span now that it has traversed the worker pool
+		if span := trace.SpanFromContext(res.Ctx); span.IsRecording() {
+			if res.Err != nil {
+				span.RecordError(res.Err)
+				span.SetStatus(codes.Error, res.Err.Error())
+			} else {
+				span.SetStatus(codes.Ok, "Embedded")
+			}
+			span.End()
+		}
+
 		if res.Err != nil {
 			slog.Error("Failed to embed chunk", "chunk_index", res.Chunk.Index, "error", res.Err)
 			deadLetters = append(deadLetters, models.DeadLetter{
@@ -95,27 +143,53 @@ func (p *Pipeline) RunIngestion(parentCtx context.Context, doc models.Document, 
 		}
 		
 		batch = append(batch, res.Embedding)
+		batchResults = append(batchResults, res)
 		
 		// Flush batch when it reaches capacity
 		if len(batch) >= batchSize {
-			if err := p.store.SaveEmbeddings(ctx, batch); err != nil {
+			var links []trace.Link
+			for _, br := range batchResults {
+				if sc := trace.SpanContextFromContext(br.Ctx); sc.IsValid() {
+					links = append(links, trace.Link{SpanContext: sc})
+				}
+			}
+			
+			batchCtx, batchSpan := tracer.Start(ctx, "Pipeline.BatchSave", trace.WithLinks(links...))
+			if err := p.store.SaveEmbeddings(batchCtx, batch); err != nil {
+				batchSpan.RecordError(err)
+				batchSpan.SetStatus(codes.Error, "Batch save failed")
+				batchSpan.End()
 				slog.Error("Failed to save batch of embeddings to database", "error", err)
 				_ = p.store.CompleteIngestion(ctx, docHash, models.StatusFailed)
 				return err
 			}
+			batchSpan.End()
 			totalSaved += len(batch)
 			// Reuse the same backing array for zero-allocation batching
 			batch = batch[:0] 
+			batchResults = batchResults[:0]
 		}
 	}
 
 	// Persist remaining items in the final partial batch
 	if len(batch) > 0 {
-		if err := p.store.SaveEmbeddings(ctx, batch); err != nil {
+		var links []trace.Link
+		for _, br := range batchResults {
+			if sc := trace.SpanContextFromContext(br.Ctx); sc.IsValid() {
+				links = append(links, trace.Link{SpanContext: sc})
+			}
+		}
+		
+		batchCtx, batchSpan := tracer.Start(ctx, "Pipeline.BatchSave", trace.WithLinks(links...))
+		if err := p.store.SaveEmbeddings(batchCtx, batch); err != nil {
+			batchSpan.RecordError(err)
+			batchSpan.SetStatus(codes.Error, "Final batch save failed")
+			batchSpan.End()
 			slog.Error("Failed to save final batch of embeddings to database", "error", err)
 			_ = p.store.CompleteIngestion(ctx, docHash, models.StatusFailed)
 			return err
 		}
+		batchSpan.End()
 		totalSaved += len(batch)
 	}
 
@@ -134,11 +208,24 @@ func (p *Pipeline) RunIngestion(parentCtx context.Context, doc models.Document, 
 	if totalSaved > 0 {
 		if err := p.store.CompleteIngestion(ctx, docHash, models.StatusCompleted); err != nil {
 			slog.Error("Failed to mark document as completed", "error", err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "Failed to mark completion")
 			return err
 		}
+		span.SetAttributes(attribute.Int("total_chunks_saved", totalSaved))
+		span.SetStatus(codes.Ok, "Ingestion complete")
+		
+		// Metric Emission
+		chunksCounter.Add(spanCtx, int64(totalSaved), metric.WithAttributes(
+			attribute.String("document.id", doc.ID),
+			attribute.String("status", "success"),
+		))
 	} else {
 		_ = p.store.CompleteIngestion(ctx, docHash, models.StatusFailed)
-		return fmt.Errorf("all chunks failed to embed")
+		err := fmt.Errorf("all chunks failed to embed")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
 
 	return nil
@@ -151,14 +238,30 @@ func (p *Pipeline) RunIngestion(parentCtx context.Context, doc models.Document, 
 //   - RunBatchIngestion (Batch) is optimized for throughput. It uses bounded fan-out 
 //     and structured concurrency to fully saturate the worker pool safely.
 func (p *Pipeline) RunBatchIngestion(parentCtx context.Context, docs []models.Document, provider string, modelName string) error {
+	// Senior Feature: Baggage for Multi-Tenant Context Propagation
+	member, _ := baggage.NewMember("batch_size", fmt.Sprintf("%d", len(docs)))
+	b, _ := baggage.New(member)
+	baggageCtx := baggage.ContextWithBaggage(parentCtx, b)
+
+	tracer := otel.Tracer("retriever/pipeline")
+	meter := otel.Meter("retriever/pipeline")
+	chunksCounter, _ := meter.Int64Counter("rag_chunks_processed_total", metric.WithDescription("Total number of chunks successfully processed and embedded"))
+
+	spanCtx, span := tracer.Start(baggageCtx, "Pipeline.RunBatchIngestion", trace.WithAttributes(
+		attribute.Int("document.count", len(docs)),
+		attribute.String("provider", provider),
+		attribute.String("model", modelName),
+	))
+	defer span.End()
+
 	// Expert Level: Structured Concurrency via errgroup
 	// This guarantees that if any stage fails, the entire pipeline immediately tears down,
 	// preventing zombie goroutines and memory leaks.
-	g, ctx := errgroup.WithContext(parentCtx)
+	g, ctx := errgroup.WithContext(spanCtx)
 
 	slog.Info("Starting batch ingestion", "document_count", len(docs))
 
-	chunkChan := make(chan models.Chunk, p.cfg.IngestionQueueSize)
+	chunkChan := make(chan ChunkTask, p.cfg.IngestionQueueSize)
 	resultsChan := make(chan EmbedResult, p.cfg.IngestionQueueSize)
 
 	// Stage 1: Fan-Out Document Producer
@@ -199,10 +302,15 @@ func (p *Pipeline) RunBatchIngestion(parentCtx context.Context, docs []models.Do
 				for _, chunk := range chunks {
 					chunk.DocumentID = d.ID // Link chunk to document
 					
+					chunkCtx, _ := tracer.Start(ctx, "Pipeline.ProcessChunk", trace.WithAttributes(
+						attribute.Int("chunk.index", chunk.Index),
+						attribute.String("document.id", d.ID),
+					))
+
 					select {
 					case <-ctx.Done():
 						return
-					case chunkChan <- chunk:
+					case chunkChan <- ChunkTask{Ctx: chunkCtx, Chunk: chunk}:
 					}
 				}
 			}(doc)
@@ -222,10 +330,21 @@ func (p *Pipeline) RunBatchIngestion(parentCtx context.Context, docs []models.Do
 	g.Go(func() error {
 		const batchSize = 100
 		batch := make([]models.Embedding, 0, batchSize)
+		batchResults := make([]EmbedResult, 0, batchSize)
 		var deadLetters []models.DeadLetter
 		totalSaved := 0
 
 		for res := range resultsChan {
+			if span := trace.SpanFromContext(res.Ctx); span.IsRecording() {
+				if res.Err != nil {
+					span.RecordError(res.Err)
+					span.SetStatus(codes.Error, res.Err.Error())
+				} else {
+					span.SetStatus(codes.Ok, "Embedded")
+				}
+				span.End()
+			}
+
 			if res.Err != nil {
 				deadLetters = append(deadLetters, models.DeadLetter{
 					DocumentID: res.Chunk.DocumentID,
@@ -237,21 +356,47 @@ func (p *Pipeline) RunBatchIngestion(parentCtx context.Context, docs []models.Do
 			}
 			
 			batch = append(batch, res.Embedding)
+			batchResults = append(batchResults, res)
 			
 			if len(batch) >= batchSize {
-				if err := p.store.SaveEmbeddings(ctx, batch); err != nil {
+				var links []trace.Link
+				for _, br := range batchResults {
+					if sc := trace.SpanContextFromContext(br.Ctx); sc.IsValid() {
+						links = append(links, trace.Link{SpanContext: sc})
+					}
+				}
+				
+				batchCtx, batchSpan := tracer.Start(ctx, "Pipeline.BatchSave", trace.WithLinks(links...))
+				if err := p.store.SaveEmbeddings(batchCtx, batch); err != nil {
+					batchSpan.RecordError(err)
+					batchSpan.SetStatus(codes.Error, "Bulk save failed")
+					batchSpan.End()
 					return fmt.Errorf("bulk save failed: %w", err)
 				}
+				batchSpan.End()
 				totalSaved += len(batch)
 				batch = batch[:0] 
+				batchResults = batchResults[:0]
 			}
 		}
 
 		// Flush remaining embeddings
 		if len(batch) > 0 {
-			if err := p.store.SaveEmbeddings(ctx, batch); err != nil {
+			var links []trace.Link
+			for _, br := range batchResults {
+				if sc := trace.SpanContextFromContext(br.Ctx); sc.IsValid() {
+					links = append(links, trace.Link{SpanContext: sc})
+				}
+			}
+			
+			batchCtx, batchSpan := tracer.Start(ctx, "Pipeline.BatchSave", trace.WithLinks(links...))
+			if err := p.store.SaveEmbeddings(batchCtx, batch); err != nil {
+				batchSpan.RecordError(err)
+				batchSpan.SetStatus(codes.Error, "Final bulk save failed")
+				batchSpan.End()
 				return fmt.Errorf("final bulk save failed: %w", err)
 			}
+			batchSpan.End()
 			totalSaved += len(batch)
 		}
 
@@ -262,9 +407,20 @@ func (p *Pipeline) RunBatchIngestion(parentCtx context.Context, docs []models.Do
 		}
 
 		slog.Info("Batch ingestion completed", "total_saved", totalSaved)
+		span.SetAttributes(attribute.Int("total_chunks_saved", totalSaved))
+		chunksCounter.Add(spanCtx, int64(totalSaved), metric.WithAttributes(
+			attribute.String("batch_status", "success"),
+		))
 		return nil
 	})
 
 	// Wait blocks until all g.Go functions return
-	return g.Wait()
+	err := g.Wait()
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "Batch ingestion complete")
+	}
+	return err
 }

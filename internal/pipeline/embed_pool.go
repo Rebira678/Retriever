@@ -17,6 +17,13 @@ type EmbedResult struct {
 	Embedding models.Embedding
 	Err       error
 	Chunk     models.Chunk // Kept for retry logic downstream
+	Ctx       context.Context // Carry the context for span linking
+}
+
+// ChunkTask wraps a chunk with its specific request context to propagate traces across channels.
+type ChunkTask struct {
+	Ctx   context.Context
+	Chunk models.Chunk
 }
 
 // EmbedPool orchestrates concurrent embedding of document chunks.
@@ -51,7 +58,7 @@ func NewEmbedPool(emb embedder.Embedder, opts ...PoolOption) *EmbedPool {
 
 // Run executes the worker pool, reading from chunksIn and writing to resultsOut.
 // It blocks until chunksIn is closed and all workers have cleanly shut down.
-func (p *EmbedPool) Run(ctx context.Context, chunksIn <-chan models.Chunk, resultsOut chan<- EmbedResult) {
+func (p *EmbedPool) Run(ctx context.Context, chunksIn <-chan ChunkTask, resultsOut chan<- EmbedResult) {
 	var wg sync.WaitGroup
 	wg.Add(p.numWorkers)
 
@@ -76,13 +83,16 @@ func (p *EmbedPool) Run(ctx context.Context, chunksIn <-chan models.Chunk, resul
 				case <-ctx.Done():
 					// Context cancelled, initiate clean shutdown
 					return
-				case chunk, ok := <-chunksIn:
+				case task, ok := <-chunksIn:
 					if !ok {
 						// Channel closed, drain complete
 						return
 					}
 
-					emb, err := p.embedder.EmbedChunk(ctx, chunk)
+					chunkCtx := task.Ctx
+					chunk := task.Chunk
+
+					emb, err := p.embedder.EmbedChunk(chunkCtx, chunk)
 					if err == nil {
 						emb.ChunkIndex = chunk.Index
 						emb.DocumentID = chunk.DocumentID
@@ -97,6 +107,7 @@ func (p *EmbedPool) Run(ctx context.Context, chunksIn <-chan models.Chunk, resul
 						Embedding: emb,
 						Err:       err,
 						Chunk:     chunk,
+						Ctx:       chunkCtx,
 					}
 
 					// Route the result downstream with context awareness
