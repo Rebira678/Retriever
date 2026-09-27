@@ -10,6 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/Rebira678/Retriever/internal/models"
 )
 
@@ -89,6 +94,15 @@ type geminiEmbedResponse struct {
 
 // EmbedChunk executes the network request to fetch vector embeddings from Gemini.
 func (e *GeminiEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (models.Embedding, error) {
+	tracer := otel.Tracer("retriever/embedder/gemini")
+	spanCtx, span := tracer.Start(ctx, "GeminiEmbedder.EmbedChunk", trace.WithAttributes(
+		attribute.String("document.id", chunk.DocumentID),
+		attribute.Int("chunk.index", chunk.Index),
+		attribute.Int("chunk.length", len(chunk.Text)),
+		attribute.String("model", e.model),
+	))
+	defer span.End()
+
 	buf := e.bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer e.bufPool.Put(buf)
@@ -99,39 +113,62 @@ func (e *GeminiEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (mo
 	}{{Text: chunk.Text}}
 
 	if err := json.NewEncoder(buf).Encode(&reqBody); err != nil {
-		return models.Embedding{}, fmt.Errorf("failed to encode gemini request: %w", err)
+		err = fmt.Errorf("failed to encode gemini request: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return models.Embedding{}, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.apiURL, buf)
+	req, err := http.NewRequestWithContext(spanCtx, http.MethodPost, e.apiURL, buf)
 	if err != nil {
-		return models.Embedding{}, fmt.Errorf("failed to create request: %w", err)
+		err = fmt.Errorf("failed to create request: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return models.Embedding{}, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return models.Embedding{}, fmt.Errorf("gemini api request failed: %w", err)
+		err = fmt.Errorf("gemini api request failed: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return models.Embedding{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		return models.Embedding{}, fmt.Errorf("gemini api error (status %d): %s", resp.StatusCode, string(bodyBytes))
+		err = fmt.Errorf("gemini api error (status %d): %s", resp.StatusCode, string(bodyBytes))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return models.Embedding{}, err
 	}
 
 	var result geminiEmbedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return models.Embedding{}, fmt.Errorf("failed to decode gemini response: %w", err)
+		err = fmt.Errorf("failed to decode gemini response: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return models.Embedding{}, err
 	}
 
 	if result.Error != nil {
-		return models.Embedding{}, fmt.Errorf("gemini api returned error: %s", result.Error.Message)
+		err = fmt.Errorf("gemini api returned error: %s", result.Error.Message)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return models.Embedding{}, err
 	}
 
 	if len(result.Embedding.Values) == 0 {
-		return models.Embedding{}, fmt.Errorf("no embeddings returned in gemini response")
+		err = fmt.Errorf("no embeddings returned in gemini response")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return models.Embedding{}, err
 	}
+
+	span.SetStatus(codes.Ok, "Embedding successful")
 
 	return models.Embedding{
 		ChunkIndex: chunk.Index,

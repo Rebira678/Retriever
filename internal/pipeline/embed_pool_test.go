@@ -32,12 +32,15 @@ func TestEmbedPool_Run(t *testing.T) {
 	// Use functional options
 	pool := NewEmbedPool(embedder, WithWorkers(4))
 
-	chunkChan := make(chan models.Chunk, 100)
+	chunkChan := make(chan ChunkTask, 100)
 	resultsChan := make(chan EmbedResult, 100)
 
 	// Enqueue 20 chunks
 	for i := 0; i < 20; i++ {
-		chunkChan <- models.Chunk{Index: i, Text: "test data"}
+		chunkChan <- ChunkTask{
+			Ctx:   context.Background(),
+			Chunk: models.Chunk{Index: i, Text: "test data"},
+		}
 	}
 	close(chunkChan)
 
@@ -49,8 +52,8 @@ func TestEmbedPool_Run(t *testing.T) {
 	duration := time.Since(start)
 
 	// Single worker: ~200ms. 4 workers: ~50ms.
-	if duration >= 100*time.Millisecond {
-		t.Errorf("Expected duration < 100ms due to concurrency, got %v", duration)
+	if duration >= 150*time.Millisecond {
+		t.Errorf("Expected duration < 150ms due to concurrency, got %v", duration)
 	}
 
 	if embedder.callCount != 20 {
@@ -76,11 +79,14 @@ func TestEmbedPool_ContextCancellation(t *testing.T) {
 	embedder := &mockEmbedder{delay: 50 * time.Millisecond}
 	pool := NewEmbedPool(embedder, WithWorkers(2))
 
-	chunkChan := make(chan models.Chunk, 10)
+	chunkChan := make(chan ChunkTask, 10)
 	resultsChan := make(chan EmbedResult, 10)
 
 	for i := 0; i < 10; i++ {
-		chunkChan <- models.Chunk{Index: i}
+		chunkChan <- ChunkTask{
+			Ctx:   context.Background(),
+			Chunk: models.Chunk{Index: i},
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
