@@ -10,6 +10,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -127,15 +131,35 @@ func initializeSchema(ctx context.Context, pool *pgxpool.Pool, dimension int) er
 	return nil
 }
 
+// injectTraceComment is a Senior Pattern (SQLCommenter) that injects the W3C traceparent
+// directly into the SQL query string. This bridges the gap between Go tracing and DB infrastructure
+// (like pg_stat_statements) so DBAs can correlate slow queries to specific traces.
+func injectTraceComment(ctx context.Context, query string) string {
+	spanCtx := trace.SpanContextFromContext(ctx)
+	if !spanCtx.IsValid() {
+		return query
+	}
+	
+	// W3C Trace Context format: 00-{trace_id}-{span_id}-{trace_flags}
+	traceparent := fmt.Sprintf("00-%s-%s-%s", spanCtx.TraceID().String(), spanCtx.SpanID().String(), spanCtx.TraceFlags().String())
+	return fmt.Sprintf("/* traceparent='%s' */ %s", traceparent, query)
+}
+
 // SaveEmbeddings persists a batch of embeddings using high-performance pgx.Batch.
 func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []models.Embedding) error {
+	tracer := otel.Tracer("retriever/storage/postgres")
+	spanCtx, span := tracer.Start(ctx, "PostgresStorage.SaveEmbeddings", trace.WithAttributes(
+		attribute.Int("batch.size", len(embeddings)),
+	))
+	defer span.End()
+
 	if len(embeddings) == 0 {
 		return nil
 	}
 
 	batch := &pgx.Batch{}
 	
-	insertSQL := `
+	insertSQL := injectTraceComment(spanCtx, `
 		INSERT INTO chunks (document_id, chunk_index, model, content, content_hash, embedding, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (document_id, content_hash, model) DO UPDATE 
@@ -143,7 +167,7 @@ func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []model
 		    content = EXCLUDED.content, 
 		    embedding = EXCLUDED.embedding,
 		    created_at = EXCLUDED.created_at
-	`
+	`)
 	
 	// Queue all inserts into a single network round-trip batch
 	for _, emb := range embeddings {
@@ -152,23 +176,38 @@ func (s *PostgresStorage) SaveEmbeddings(ctx context.Context, embeddings []model
 	}
 	
 	// Send the batch
-	br := s.pool.SendBatch(ctx, batch)
+	br := s.pool.SendBatch(spanCtx, batch)
 	defer br.Close()
 	
 	// Ensure all inserts succeeded
 	for i := 0; i < len(embeddings); i++ {
 		if _, err := br.Exec(); err != nil {
-			return fmt.Errorf("failed to insert embedding at index %d: %w", i, err)
+			err = fmt.Errorf("failed to insert embedding at index %d: %w", i, err)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
 		}
 	}
 	
+	span.SetStatus(codes.Ok, "Batch saved successfully")
 	return nil
 }
 
 // SearchSimilar uses pgvector's (<=>) operator (cosine distance) to find the most relevant chunks.
 func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) {
+	tracer := otel.Tracer("retriever/storage/postgres")
+	spanCtx, span := tracer.Start(ctx, "PostgresStorage.SearchSimilar", trace.WithAttributes(
+		attribute.String("model", modelName),
+		attribute.Int("topK", topK),
+		attribute.Int("efSearch", efSearch),
+	))
+	defer span.End()
+
 	if topK < 0 {
-		return nil, fmt.Errorf("failed to execute similarity search: topK cannot be negative")
+		err := fmt.Errorf("failed to execute similarity search: topK cannot be negative")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
 	// Dynamically configure ef_search for this specific transaction.
@@ -182,18 +221,21 @@ func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []fl
 	}
 
 	// We MUST filter by model to isolate vector spaces (e.g. OpenAI vs Gemini vs Local).
-	query := `
+	query := injectTraceComment(spanCtx, `
 		SELECT document_id, chunk_index, content, (embedding <=> $1) AS distance
 		FROM chunks
 		WHERE model = $2
 		ORDER BY embedding <=> $1 ASC
 		LIMIT $3
-	`
+	`)
 
 	vec := pgvector.NewVector(queryEmbedding)
-	rows, err := s.pool.Query(ctx, query, vec, modelName, topK)
+	rows, err := s.pool.Query(spanCtx, query, vec, modelName, topK)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute similarity search query: %w", err)
+		err = fmt.Errorf("failed to execute similarity search query: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -211,16 +253,33 @@ func (s *PostgresStorage) SearchSimilar(ctx context.Context, queryEmbedding []fl
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows iteration error: %w", err)
+		err = fmt.Errorf("rows iteration error: %w", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
+	span.SetAttributes(attribute.Int("results.count", len(results)))
+	span.SetStatus(codes.Ok, "Search complete")
 	return results, nil
 }
 
 // SearchHybrid implements expert-level Reciprocal Rank Fusion (RRF) using a Scatter-Gather pattern.
 func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, queryEmbedding []float32, modelName string, topK int, efSearch int) ([]models.SearchResult, error) {
+	tracer := otel.Tracer("retriever/storage/postgres")
+	spanCtx, span := tracer.Start(ctx, "PostgresStorage.SearchHybrid", trace.WithAttributes(
+		attribute.String("model", modelName),
+		attribute.Int("topK", topK),
+		attribute.Int("efSearch", efSearch),
+		attribute.Int("query.length", len(queryText)),
+	))
+	defer span.End()
+
 	if topK < 0 {
-		return nil, fmt.Errorf("failed to execute hybrid search: topK cannot be negative")
+		err := fmt.Errorf("failed to execute hybrid search: topK cannot be negative")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
 	if efSearch > 0 {
@@ -239,20 +298,20 @@ func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, qu
 	// Instead of forcing PostgreSQL to execute complex CTEs and UNION ALLs on a single DB connection,
 	// we dispatch two concurrent queries via the connection pool. This guarantees parallel execution
 	// and shifts the CPU burden of ranking/fusing from the Database to the horizontally scalable Go application.
-	g, gCtx := errgroup.WithContext(ctx)
+	g, gCtx := errgroup.WithContext(spanCtx)
 
 	var vectorResults []models.SearchResult
 	var keywordResults []models.SearchResult
 
 	// 1. Scatter: Concurrent Vector Search
 	g.Go(func() error {
-		query := `
+		query := injectTraceComment(spanCtx, `
 			SELECT document_id, chunk_index, content
 			FROM chunks
 			WHERE model = $1
 			ORDER BY embedding <=> $2
 			LIMIT $3
-		`
+		`)
 		vec := pgvector.NewVector(queryEmbedding)
 		rows, err := s.pool.Query(gCtx, query, modelName, vec, candidates)
 		if err != nil {
@@ -272,13 +331,13 @@ func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, qu
 
 	// 2. Scatter: Concurrent Keyword Search
 	g.Go(func() error {
-		query := `
+		query := injectTraceComment(spanCtx, `
 			SELECT document_id, chunk_index, content
 			FROM chunks
 			WHERE model = $1 AND content_tsv @@ websearch_to_tsquery('english', $2)
 			ORDER BY ts_rank_cd(content_tsv, websearch_to_tsquery('english', $2)) DESC
 			LIMIT $3
-		`
+		`)
 		rows, err := s.pool.Query(gCtx, query, modelName, queryText, candidates)
 		if err != nil {
 			return fmt.Errorf("keyword search failed: %w", err)
@@ -348,6 +407,9 @@ func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, qu
 	if len(finalResults) > topK {
 		finalResults = finalResults[:topK]
 	}
+
+	span.SetAttributes(attribute.Int("results.count", len(finalResults)))
+	span.SetStatus(codes.Ok, "Hybrid search complete")
 
 	return finalResults, nil
 }
