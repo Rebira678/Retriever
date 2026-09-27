@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/Rebira678/Retriever/internal/models"
@@ -95,12 +96,18 @@ type geminiEmbedResponse struct {
 // EmbedChunk executes the network request to fetch vector embeddings from Gemini.
 func (e *GeminiEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (models.Embedding, error) {
 	tracer := otel.Tracer("retriever/embedder/gemini")
-	spanCtx, span := tracer.Start(ctx, "GeminiEmbedder.EmbedChunk", trace.WithAttributes(
-		attribute.String("document.id", chunk.DocumentID),
-		attribute.Int("chunk.index", chunk.Index),
-		attribute.Int("chunk.length", len(chunk.Text)),
-		attribute.String("model", e.model),
-	))
+	spanCtx, span := tracer.Start(ctx, "HTTP POST "+e.apiURL,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			semconv.HTTPRequestMethodKey.String("POST"),
+			semconv.URLFullKey.String(e.apiURL),
+			attribute.String("gen_ai.system", "gemini"),
+			attribute.String("gen_ai.request.model", e.model),
+			attribute.String("document.id", chunk.DocumentID),
+			attribute.Int("chunk.index", chunk.Index),
+			attribute.Int("chunk.length", len(chunk.Text)),
+		),
+	)
 	defer span.End()
 
 	buf := e.bufPool.Get().(*bytes.Buffer)
@@ -137,6 +144,8 @@ func (e *GeminiEmbedder) EmbedChunk(ctx context.Context, chunk models.Chunk) (mo
 		return models.Embedding{}, err
 	}
 	defer resp.Body.Close()
+
+	span.SetAttributes(semconv.HTTPResponseStatusCodeKey.Int(resp.StatusCode))
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
