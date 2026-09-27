@@ -6,3 +6,11 @@
   --line: #333333;
   --ember: #f97316;
 }
+:root {
+  --ember-hot: #fdba74;
+  --ok: #22c55e;
+  --text: #f5f5f5;
+  --sub: #a3a3a3;
+  --sans: 'Inter', -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+}
