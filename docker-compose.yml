@@ -2,7 +2,6 @@ version: '3.8'
 
 services:
   postgres:
-    # We use the pgvector image which comes with Postgres 16 and the pgvector extension pre-installed.
     image: pgvector/pgvector:pg16
     container_name: retriever-postgres
     environment:
@@ -15,15 +14,68 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    container_name: retriever-jaeger
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
+  # --- EXPERT OBSERVABILITY STACK (Loki, Tempo, Prometheus, Grafana) ---
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: retriever-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
     ports:
-      - "16686:16686" # UI
-      - "4327:4327"   # OTLP gRPC
-      - "4328:4328"   # OTLP HTTP
+      - "4327:4327"   # OTLP gRPC (Go app pushes here)
+      - "8889:8889"   # Prometheus exporter metrics endpoint
+    depends_on:
+      - tempo
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: retriever-tempo
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+    ports:
+      - "3200:3200"   # Tempo API
+      - "4317:4317"   # OTLP gRPC receiver
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: retriever-prometheus
+    command:
+      - --config.file=/etc/prometheus.yml
+      - --enable-feature=exemplar-storage # Expert: Enables Metric-to-Trace correlation
+    volumes:
+      - ./prometheus.yml:/etc/prometheus.yml
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: retriever-grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+    volumes:
+      - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:latest
+    container_name: retriever-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
     restart: unless-stopped
 
 volumes:
