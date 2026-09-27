@@ -18,23 +18,23 @@ graph TD
     RateLimiter[Adaptive Load Shedder]:::middleware
     Server[gRPC Search Server]:::middleware
     
-    subgraph Core Pipeline [Ingestion & Processing Engine]
-        Orchestrator[Pipeline Orchestrator]:::core
-        Chunker[Rabin-Karp Rolling Hash]:::core
-        Embedder[Gemini / OpenAI API]:::core
-        CB[Atomic Circuit Breaker]:::core
+    subgraph CorePipeline ["Ingestion & Processing Engine"]
+        Orchestrator["Pipeline Orchestrator"]:::core
+        Chunker["Rabin-Karp Rolling Hash"]:::core
+        Embedder["Gemini / OpenAI API"]:::core
+        CB["Atomic Circuit Breaker"]:::core
     end
     
-    subgraph Data Layer [Storage & Retrieval]
-        Postgres[(PostgreSQL + pgvector)]:::db
-        HybridSearch{Reciprocal Rank Fusion}:::core
+    subgraph DataLayer ["Storage & Retrieval"]
+        Postgres[("PostgreSQL + pgvector")]:::db
+        HybridSearch{"Reciprocal Rank Fusion"}:::core
     end
     
-    subgraph Observability [Grafana Unified Stack]
-        OTel[OTel Collector Gateway]:::obs
-        Tempo[Grafana Tempo - Traces]:::obs
-        Prometheus[Prometheus - Metrics]:::obs
-        Loki[Grafana Loki - Logs]:::obs
+    subgraph ObservabilityStack ["Grafana Unified Stack"]
+        OTel["OTel Collector Gateway"]:::obs
+        Tempo["Grafana Tempo - Traces"]:::obs
+        Prometheus["Prometheus - Metrics"]:::obs
+        Loki["Grafana Loki - Logs"]:::obs
     end
 
     %% Edges

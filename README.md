@@ -12,12 +12,12 @@ Retriever utilizes a **Scatter-Gather** pattern for search and a **Decoupled Wor
 
 ```mermaid
 flowchart LR
-    A[Client Request] -->|gRPC| B(Adaptive Load Shedder)
-    B --> C{Hybrid Search}
-    C -->|Vector <=>| D[(PostgreSQL pgvector)]
-    C -->|Keyword @@| D
-    C -->|Fuse| E(Reciprocal Rank Fusion)
-    E --> F[Response]
+    A["Client Request"] -->|gRPC| B("Adaptive Load Shedder")
+    B --> C{"Hybrid Search"}
+    C -->|"Vector <=>"| D[("PostgreSQL pgvector")]
+    C -->|"Keyword @@"| D
+    C -->|Fuse| E("Reciprocal Rank Fusion")
+    E --> F["Response"]
 ```
 
 ## 🌟 Key Capabilities
