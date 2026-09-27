@@ -24,12 +24,14 @@ import (
 	"github.com/Rebira678/Retriever/internal/ratelimit"
 	"github.com/Rebira678/Retriever/internal/server"
 	"github.com/Rebira678/Retriever/internal/storage"
+	"github.com/Rebira678/Retriever/internal/telemetry"
 	searchv1 "github.com/Rebira678/Retriever/pkg/api/search/v1"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"net"
 
 	_ "github.com/joho/godotenv/autoload"
@@ -53,7 +55,24 @@ func main() {
 		"chunk_size", cfg.ChunkSize,
 		"chunk_overlap", cfg.ChunkOverlap,
 		"strategy", cfg.ChunkStrategy,
+		"otlp_endpoint", cfg.OTLPEndpoint,
 	)
+
+	// ─── Initialize OpenTelemetry Tracing & Metrics ───────────────────────────────
+	tp, mp, err := telemetry.InitTelemetry(context.Background(), "retriever", cfg.OTLPEndpoint)
+	if err != nil {
+		slog.Error("Failed to initialize OpenTelemetry telemetry", "error", err)
+	} else {
+		defer func() {
+			if err := tp.Shutdown(context.Background()); err != nil {
+				slog.Error("Failed to shutdown tracer", "error", err)
+			}
+			if err := mp.Shutdown(context.Background()); err != nil {
+				slog.Error("Failed to shutdown meter", "error", err)
+			}
+		}()
+		slog.Info("OpenTelemetry telemetry initialized", "endpoint", cfg.OTLPEndpoint)
+	}
 
 	// ─── Demo: Chunking a Sample Document ───────────────────────────────
 	sampleDoc := `Retrieval-Augmented Generation (RAG) is an AI framework that enhances
@@ -170,6 +189,7 @@ research tools to medical diagnosis assistants.`
 				slog.Error("Failed to listen for gRPC", "error", err)
 			} else {
 				grpcServer := grpc.NewServer(
+					grpc.StatsHandler(otelgrpc.NewServerHandler()),
 					grpc.ChainUnaryInterceptor(
 						server.LoggingInterceptor(slog.Default()),
 						server.RecoveryInterceptor(slog.Default()),
