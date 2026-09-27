@@ -62,6 +62,10 @@ type Config struct {
 
 	// HTTPPort is the port for the HTTP health/metrics API.
 	HTTPPort string
+
+	// ─── Telemetry ───────────────────────────────────────────────────────
+	// OTLPEndpoint is the gRPC endpoint for the OpenTelemetry collector (e.g. Jaeger).
+	OTLPEndpoint string
 }
 
 // Default returns a Config with sensible defaults for local development.
@@ -82,6 +86,7 @@ func Default() *Config {
 		DatabaseURL:              "postgres://retriever:retriever@localhost:5433/retriever?sslmode=disable",
 		GRPCPort:           ":50051",
 		HTTPPort:           ":8080",
+		OTLPEndpoint:       "localhost:4327",
 	}
 }
 
@@ -147,6 +152,9 @@ func FromEnv() *Config {
 	}
 	if v := os.Getenv("RETRIEVER_HTTP_PORT"); v != "" {
 		cfg.HTTPPort = v
+	}
+	if v := os.Getenv("RETRIEVER_OTLP_ENDPOINT"); v != "" {
+		cfg.OTLPEndpoint = v
 	}
 
 	return cfg
