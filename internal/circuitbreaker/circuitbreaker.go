@@ -7,6 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sys/cpu"
 )
 
@@ -90,11 +94,13 @@ type cb struct {
 	successes atomic.Uint32
 	_         cpu.CacheLinePad
 
-	// mu serializes state transitions to prevent thundering herd.
 	mu     sync.Mutex
 	expiry time.Time
 
 	cfg Config
+	
+	// Telemetry
+	dropCounter metric.Int64Counter
 }
 
 // New creates a production-grade circuit breaker.
@@ -109,7 +115,10 @@ func New(opts ...Option) CircuitBreaker {
 		opt(&cfg)
 	}
 	
-	breaker := &cb{cfg: cfg}
+	meter := otel.Meter("retriever/circuitbreaker")
+	dropCounter, _ := meter.Int64Counter("circuit_breaker_drops_total", metric.WithDescription("Total requests dropped by the circuit breaker"))
+	
+	breaker := &cb{cfg: cfg, dropCounter: dropCounter}
 	breaker.state.Store(uint32(StateClosed))
 	return breaker
 }
@@ -117,6 +126,14 @@ func New(opts ...Option) CircuitBreaker {
 // Execute wraps the function execution within the circuit breaker lifecycle.
 func (c *cb) Execute(ctx context.Context, fn func(ctx context.Context) error) error {
 	if !c.allow() {
+		if c.dropCounter != nil {
+			c.dropCounter.Add(ctx, 1)
+		}
+		if span := trace.SpanFromContext(ctx); span.IsRecording() {
+			span.AddEvent("CircuitBreaker.Dropped", trace.WithAttributes(
+				attribute.String("reason", "circuit_open"),
+			))
+		}
 		return ErrCircuitOpen
 	}
 
