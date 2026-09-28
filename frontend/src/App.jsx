@@ -4,22 +4,96 @@ import './App.css';
 export default function App() {
   const [topK, setTopK] = useState(5);
   const [rrf, setRrf] = useState(60);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inputValue, setInputValue] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [circuitBreaker, setCircuitBreaker] = useState('CLOSED (Healthy)');
+  const [history, setHistory] = useState([]);
 
-  const docs = [
-    {id:'20003398', src:'Document Past.pdf', cos:0.82, bm25:0.85, rrf:0.36, ctx:'Context: the latest performance optimization techniques for HNSW vector search.'},
-    {id:'20003393', src:'Document Past.pdf', cos:0.323, bm25:0.23, rrf:0.38, ctx:'Context: the latest performance optimization techniques for HNSW vector search.'},
-    {id:'20003338', src:'Document Past.pdf', cos:0.37, bm25:0.25, rrf:0.13, ctx:'Context: the latest performance optimization techniques for HNSW vector search.'}
-  ];
+  const toggleInspector = (index) => {
+    setHistory(prev => {
+      const newHistory = [...prev];
+      newHistory[index].inspectorOpen = !newHistory[index].inspectorOpen;
+      return newHistory;
+    });
+  };
+
+  const handleSend = async (e) => {
+    if (e.key === 'Enter' && inputValue.trim() && !loading) {
+      const query = inputValue.trim();
+      setInputValue('');
+      setLoading(true);
+
+      const newMessage = { query, answer: '...', telemetry: null, inspectorOpen: true };
+      setHistory(prev => [...prev, newMessage]);
+
+      try {
+        const res = await fetch('http://localhost:8080/v1/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, top_k: Number(topK), rrf_k: Number(rrf) })
+        });
+        
+        if (!res.ok) throw new Error('Backend unreachable or returned an error status');
+        
+        const data = await res.json();
+
+        // Build telemetry ONLY from real backend data — zero hardcoded values
+        const realTelemetry = {
+          latencyTotalMs: data.telemetry?.latency_total_ms ?? null,
+          latencySearchMs: data.telemetry?.latency_search_ms ?? null,
+          traceId: data.telemetry?.trace_id || null,
+          resultCount: data.telemetry?.result_count ?? 0,
+          docs: (data.results || []).map(r => ({
+            id: r.document_id + "_" + (r.chunk_index ?? 0),
+            src: r.document_id,
+            score: r.score,
+            ctx: r.chunk_text
+          }))
+        };
+        
+        setHistory(prev => {
+          const newHistory = [...prev];
+          newHistory[newHistory.length - 1].answer = data.answer || "No answer returned by backend.";
+          newHistory[newHistory.length - 1].telemetry = realTelemetry;
+          return newHistory;
+        });
+
+      } catch (err) {
+        setCircuitBreaker('OPEN (Connection Failed)');
+        
+        setHistory(prev => {
+          const newHistory = [...prev];
+          newHistory[newHistory.length - 1].answer = `Error: ${err.message}. Please ensure the Go backend is running at http://localhost:8080.`;
+          return newHistory;
+        });
+        
+        // Auto-recover breaker after 3s
+        setTimeout(() => setCircuitBreaker('CLOSED (Healthy)'), 3000);
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
 
   return (
     <>
       <header>
         <div className="brand">
-          <span className="mark">🔺</span>
-          <h1>Retriever <span>v1.0.0 [Go Engine]</span></h1>
+          <div className="logo-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--ember)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polygon points="12 2 22 20 2 20" fill="var(--ember-hot)" opacity="0.2"/>
+            </svg>
+          </div>
+          <h1>Retriever <span className="version">v1.0.0</span> <span className="engine">Go Engine</span></h1>
         </div>
-        <div className="status"><span className="dot"></span> CIRCUIT BREAKER: CLOSED (Healthy)</div>
+        <div className="status" style={{
+          background: circuitBreaker.includes('OPEN') ? 'rgba(239, 68, 68, 0.1)' : undefined,
+          borderColor: circuitBreaker.includes('OPEN') ? 'rgba(239, 68, 68, 0.2)' : undefined,
+          color: circuitBreaker.includes('OPEN') ? '#ef4444' : undefined
+        }}>
+          <span className="dot" style={{ background: circuitBreaker.includes('OPEN') ? '#ef4444' : undefined }}></span> 
+          CIRCUIT BREAKER: {circuitBreaker}
+        </div>
       </header>
 
       <div className="layout">
@@ -60,69 +134,89 @@ export default function App() {
         </aside>
 
         <main>
-          <div className="chat-row">
-            <div className="icon-col"><span className="swirl">👤</span></div>
-            <p>Explain the latest performance optimization techniques for HNSW vector search.</p>
-          </div>
-          <div className="chat-row answer">
-            <div className="icon-col"><span className="lbl">AI</span></div>
-            <p>The retriever fused dense vector similarity from pgvector with sparse keyword matches
-            from tsvector, re-ranked the merged candidates with Reciprocal Rank Fusion, and passed the
-            top-scoring chunks to the generation model to ground its answer in retrieved context.</p>
-          </div>
-
-          <section className="panel-card inspector" id="inspector">
-            <div className="inspector-head" onClick={() => setInspectorOpen(!inspectorOpen)}>
-              <h3>🛠 System Engineering Telemetry Inspector</h3>
-              <span className="caret" style={{ transform: inspectorOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>▲</span>
-            </div>
-            
-            {inspectorOpen && (
-              <div className="inspector-body">
-                <p className="section-label">Performance Vitals <span className="subtle">(Stat Tiles)</span></p>
-                <div className="stat-grid">
-                  <div className="panel-card stat"><div className="label">Total Request Latency</div><div className="value">124.5ms</div></div>
-                  <div className="panel-card stat"><div className="label">Vector Search (pgvector)</div><div className="value">22.1ms</div></div>
-                  <div className="panel-card stat"><div className="label">Keyword Search (tsvector)</div><div className="value">10.4ms</div></div>
-                  <div className="panel-card stat"><div className="label">LLM Generation</div><div className="value">84.7ms</div></div>
+          <div className="chat-history">
+            {history.length === 0 && (
+              <div className="empty-state">
+                <div className="empty-icon-wrap">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--sub)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                    <line x1="3" y1="9" x2="21" y2="9"/>
+                    <line x1="9" y1="21" x2="9" y2="9"/>
+                  </svg>
                 </div>
-
-                <p className="section-label">OpenTelemetry Correlation</p>
-                <div className="otel-grid">
-                  <div><label>W3C Trace ID</label><div className="code-box">e58f96c21a0040e698d24508499291fb</div></div>
-                  <div><label>View Tempo Trace Waterfall</label><div className="code-box">http://localhost:3000/explore?left=%5B%22now-1h%22,%22now%22,%22Tempo%22,%7B%22query%22:%22e58f96c21a0040e698d24508499291fb%22%7D%5D</div></div>
-                </div>
-
-                <p className="section-label">Documents Retrieved via Reciprocal Rank Fusion</p>
-                <div className="doc-grid">
-                  {docs.map(d => (
-                    <div key={d.id} className="panel-card doc-card">
-                      <h4>Metadata</h4>
-                      <div className="row"><b>Chunk ID:</b> {d.id}</div>
-                      <div className="row"><b>Source Document:</b> {d.src}</div>
-                      <div className="metrics">
-                        <h4>Metrics</h4>
-                        <div className="row"><b>Vector Cosine Score:</b> {d.cos}</div>
-                        <div className="row"><b>Keyword BM25 Score:</b> {d.bm25}</div>
-                        <div className="row"><b>Final RRF Score:</b> {d.rrf}</div>
-                      </div>
-                      <details className="expander">
-                        <summary>Expand Context</summary>
-                        <div className="content">{d.ctx}</div>
-                      </details>
-                    </div>
-                  ))}
-                </div>
+                <h2>Retriever is ready</h2>
+                <p>Query the RAG pipeline to search your vector database.</p>
               </div>
             )}
-          </section>
+            {history.map((msg, idx) => (
+              <React.Fragment key={idx}>
+                <div className="chat-row">
+                  <div className="icon-col"><span className="swirl">👤</span></div>
+                  <p>{msg.query}</p>
+                </div>
+                <div className="chat-row answer">
+                  <div className="icon-col"><span className="lbl">AI</span></div>
+                  <p>{msg.answer}</p>
+                </div>
+
+                {msg.telemetry && (
+                  <section className="panel-card inspector">
+                    <div className="inspector-head" onClick={() => toggleInspector(idx)}>
+                      <h3>🛠 System Engineering Telemetry Inspector</h3>
+                      <span className="caret" style={{ transform: msg.inspectorOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>▲</span>
+                    </div>
+                    
+                    {msg.inspectorOpen && (
+                      <div className="inspector-body">
+                        <p className="section-label">Performance Vitals <span className="subtle">(Real Measurements)</span></p>
+                        <div className="stat-grid">
+                          <div className="panel-card stat"><div className="label">Total Request Latency</div><div className="value">{msg.telemetry.latencyTotalMs != null ? `${msg.telemetry.latencyTotalMs}ms` : '—'}</div></div>
+                          <div className="panel-card stat"><div className="label">Search Latency (Embed + DB)</div><div className="value">{msg.telemetry.latencySearchMs != null ? `${msg.telemetry.latencySearchMs}ms` : '—'}</div></div>
+                          <div className="panel-card stat"><div className="label">Results Retrieved</div><div className="value">{msg.telemetry.resultCount}</div></div>
+                          <div className="panel-card stat"><div className="label">Search Mode</div><div className="value">Hybrid RRF</div></div>
+                        </div>
+
+                        <p className="section-label">OpenTelemetry Correlation</p>
+                        <div className="otel-grid">
+                          <div><label>W3C Trace ID</label><div className="code-box">{msg.telemetry.traceId || 'N/A (OTel collector offline)'}</div></div>
+                          <div><label>View Tempo Trace Waterfall</label><div className="code-box">{msg.telemetry.traceId ? <a href={`http://localhost:3000/explore?schemaVersion=1&panes=${encodeURIComponent(JSON.stringify({"pane1":{"datasource":"tempo","queries":[{"refId":"A","datasource":{"type":"tempo","uid":"tempo"},"queryType":"traceql","query":msg.telemetry.traceId}],"range":{"from":"now-1h","to":"now"}}}))}`} target="_blank" rel="noreferrer" style={{color: 'inherit', textDecoration: 'underline'}}>{`http://localhost:3000/explore?schemaVersion=1&panes=... (Trace: ${msg.telemetry.traceId})`}</a> : 'N/A'}</div></div>
+                        </div>
+
+                        <p className="section-label">Documents Retrieved via Reciprocal Rank Fusion</p>
+                        <div className="doc-grid">
+                          {(msg.telemetry.docs || []).map(d => (
+                            <div key={d.id} className="panel-card doc-card">
+                              <h4>Metadata</h4>
+                              <div className="row"><b>Chunk ID:</b> {d.id}</div>
+                              <div className="row"><b>Source Document:</b> {d.src}</div>
+                              <div className="metrics">
+                                <h4>Metrics</h4>
+                                <div className="row"><b>RRF Fusion Score:</b> {d.score.toFixed(4)}</div>
+                              </div>
+                              <details className="expander">
+                                <summary>Expand Context</summary>
+                                <div className="content">{d.ctx}</div>
+                              </details>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </section>
+                )}
+              </React.Fragment>
+            ))}
+          </div>
 
           <div className="chat-input-wrapper">
             <input 
               type="text" 
               className="chat-input" 
               placeholder="Query the RAG pipeline..."
-              disabled
+              value={inputValue}
+              onChange={e => setInputValue(e.target.value)}
+              onKeyDown={handleSend}
+              disabled={loading}
             />
           </div>
         </main>
