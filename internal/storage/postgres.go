@@ -328,10 +328,10 @@ func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, qu
 		defer childSpan.End()
 
 		query := injectTraceComment(spanCtx, `
-			SELECT document_id, chunk_index, content
+			SELECT document_id, chunk_index, content, embedding <=> $2 AS distance
 			FROM chunks
-			WHERE model = $1
-			ORDER BY embedding <=> $2
+			WHERE model = $1 AND (embedding <=> $2) < 0.35
+			ORDER BY distance
 			LIMIT $3
 		`)
 		vec := pgvector.NewVector(queryEmbedding)
@@ -343,7 +343,7 @@ func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, qu
 
 		for rows.Next() {
 			var r models.SearchResult
-			if err := rows.Scan(&r.DocumentID, &r.ChunkIndex, &r.ChunkText); err != nil {
+			if err := rows.Scan(&r.DocumentID, &r.ChunkIndex, &r.ChunkText, &r.VectorDistance); err != nil {
 				return err
 			}
 			vectorResults = append(vectorResults, r)
@@ -399,10 +399,11 @@ func (s *PostgresStorage) SearchHybrid(ctx context.Context, queryText string, qu
 		rank := float64(i + 1)
 		key := chunkKey{DocID: res.DocumentID, Index: res.ChunkIndex}
 		fusionMap[key] = &models.SearchResult{
-			DocumentID: res.DocumentID,
-			ChunkIndex: res.ChunkIndex,
-			ChunkText:  res.ChunkText,
-			Score:      alphaVector * (1.0 / (rrfK + rank)),
+			DocumentID:     res.DocumentID,
+			ChunkIndex:     res.ChunkIndex,
+			ChunkText:      res.ChunkText,
+			Score:          alphaVector * (1.0 / (rrfK + rank)),
+			VectorDistance: res.VectorDistance,
 		}
 	}
 
