@@ -42,7 +42,7 @@ flowchart LR
 
 ## ⚡ Quick Start
 
-### 1. Launch the Observability Stack
+### 1. Launch the Infrastructure & Observability Stack
 Start PostgreSQL (`pgvector`), Grafana, Loki, Tempo, Prometheus, and the OTel Collector:
 ```bash
 docker-compose up -d
@@ -54,17 +54,25 @@ cp .env.example .env
 # Set RETRIEVER_GEMINI_API_KEY or RETRIEVER_OPENAI_API_KEY
 ```
 
-### 3. Start the RAG Server
+### 3. Start the Go RAG Backend
+The Go backend handles document ingestion, hybrid search, and telemetry export.
 ```bash
 go run ./cmd/retriever
 ```
+*The backend will automatically connect to Postgres on port 5432 and expose a REST bridge on port 8080.*
 
-### 4. View Telemetry (Grafana)
-Run the load generator to simulate traffic and trigger the circuit breaker:
+### 4. Start the React Frontend
+The frontend provides a real-time chat interface with rich observability trace links.
+Open a new terminal window:
 ```bash
-go run ./cmd/trace-generator
+cd frontend
+npm install
+npm run dev
 ```
-Navigate to **http://localhost:3000** to view the correlated Service Maps, Traces, and Logs.
+Navigate to **http://localhost:5173** in your browser to interact with the RAG pipeline!
+
+### 5. View Telemetry (Grafana)
+Every search in the frontend generates a W3C Trace ID. You can click the trace links directly in the chat UI, or manually navigate to **http://localhost:3000** to view the correlated Service Maps, Traces, and Logs.
 
 ---
 
