@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -45,11 +46,13 @@ func InitTelemetry(ctx context.Context, serviceName, endpoint string) (*sdktrace
 		return nil, nil, fmt.Errorf("failed to create tracing resource: %w", err)
 	}
 
+	bsp := sdktrace.NewBatchSpanProcessor(traceExporter, sdktrace.WithBatchTimeout(200*time.Millisecond))
+	
 	// Set up Tracer Provider (with Tail-based readiness: always sample locally, collector handles production filtering)
 	tracerProvider := sdktrace.NewTracerProvider(
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(sdktrace.NewBatchSpanProcessor(traceExporter)),
+		sdktrace.WithSpanProcessor(bsp),
 	)
 	otel.SetTracerProvider(tracerProvider)
 
