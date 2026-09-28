@@ -32,7 +32,7 @@ services:
   tempo:
     image: grafana/tempo:latest
     container_name: retriever-tempo
-    command: [ "-config.file=/etc/tempo.yaml" ]
+    command: [ "-config.file=/etc/tempo.yaml", "-config.enable-legacy-overrides=true" ]
     volumes:
       - ./tempo.yaml:/etc/tempo.yaml
     ports:
