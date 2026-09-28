@@ -95,6 +95,9 @@ type SearchResult struct {
 
 	// ChunkIndex is the position of this chunk in the original document.
 	ChunkIndex int `json:"chunk_index"`
+
+	// VectorDistance is the absolute distance metric from pgvector.
+	VectorDistance float64 `json:"vector_distance,omitempty"`
 }
 
 // IngestionStatus defines the current state of a document in the idempotency store.
