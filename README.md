@@ -59,7 +59,7 @@ The Go backend handles document ingestion, hybrid search, and telemetry export.
 ```bash
 go run ./cmd/retriever
 ```
-*The backend will automatically connect to Postgres on port 5432 and expose a REST bridge on port 8080.*
+*The backend will automatically connect to Postgres on port 5432, exposing a REST API on port 8080 and the primary gRPC server on port 50051.*
 
 ### 4. Start the React Frontend
 The frontend provides a real-time chat interface with rich observability trace links.
